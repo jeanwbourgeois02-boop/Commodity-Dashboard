@@ -1,6 +1,6 @@
 """
 Commodity Intelligence Dashboard — Phase 1
-Data: Twelve Data API (prices), EIA API (inventories), CFTC (COT), RSS (news)
+Sources: OilPriceAPI (commodities), Twelve Data (equities/macro), EIA (inventories), CFTC (COT)
 Run: python app.py → open http://localhost:8050
 """
 
@@ -14,7 +14,6 @@ import feedparser
 from datetime import datetime, timedelta
 import os
 
-# ── App ───────────────────────────────────────────────────────────────────────
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.DARKLY],
@@ -24,7 +23,6 @@ app = dash.Dash(
 )
 server = app.server
 
-# ── Colours ───────────────────────────────────────────────────────────────────
 C = {
     "bg":      "#0f1117",
     "surface": "#1a1d27",
@@ -41,51 +39,65 @@ C = {
 }
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
-TD_KEY  = "d01faaa78c0b467f93d8b35dc09ee7fc"
-TD_BASE = "https://api.twelvedata.com"
-EIA_KEY = "GJf5HWhOHneOmzBuq0pwz1xWbSLwdgy63McZGJqY"
+OIL_KEY  = "799133b15930b2ffdf9835f8e09c980b232eecab16be00f2956d91de1da5af98"
+OIL_BASE = "https://api.oilpriceapi.com/v1"
+OIL_HDR  = {"Authorization": f"Token {OIL_KEY}", "Content-Type": "application/json"}
+
+TD_KEY   = "d01faaa78c0b467f93d8b35dc09ee7fc"
+TD_BASE  = "https://api.twelvedata.com"
+
+EIA_KEY  = "GJf5HWhOHneOmzBuq0pwz1xWbSLwdgy63McZGJqY"
 EIA_BASE = "https://api.eia.gov/v2"
 
-# ── Instrument definitions ────────────────────────────────────────────────────
-# Twelve Data symbol format for futures: "BRENT%20CRUDE%20OIL" or exchange:symbol
-# For futures we use the continuous contract symbols
-
-INSTRUMENTS = {
+# ── OilPriceAPI commodity codes ───────────────────────────────────────────────
+OIL_COMMODITIES = {
     # Crude
-    "Brent Crude":        {"sym": "BCO/USD",  "type": "forex",   "group": "crude"},
-    "WTI Crude":          {"sym": "WTI/USD",  "type": "forex",   "group": "crude"},
+    "Brent Crude":       "BRENT_CRUDE_USD",
+    "WTI Crude":         "WTI_USD",
+    "Dubai Crude":       "DUBAI_CRUDE_USD",
+    "Urals Crude":       "URALS_CRUDE_USD",
+    "WTI Midland":       "WTI_MIDLAND_USD",
+    "OPEC Basket":       "OPEC_BASKET_USD",
     # Products
-    "Gasoline (RBOB)":    {"sym": "RB=F",     "type": "futures", "group": "products"},
-    "Heating Oil":        {"sym": "HO=F",     "type": "futures", "group": "products"},
+    "Gasoline (RBOB)":   "GASOLINE_RBOB_USD",
+    "ULSD Diesel":       "ULSD_DIESEL_USD",
+    "Jet Fuel":          "JET_FUEL_USD",
+    "Heating Oil":       "HEATING_OIL_USD",
     # Gas
-    "Natural Gas":        {"sym": "NG=F",     "type": "futures", "group": "gas"},
-    # Metals
-    "Gold":               {"sym": "XAU/USD",  "type": "forex",   "group": "macro"},
-    "Copper":             {"sym": "XCU/USD",  "type": "forex",   "group": "macro"},
-    "Silver":             {"sym": "XAG/USD",  "type": "forex",   "group": "macro"},
-    # Equities
-    "S&P 500":            {"sym": "SPX",      "type": "index",   "group": "macro"},
-    "XLE Energy ETF":     {"sym": "XLE",      "type": "etf",     "group": "macro"},
-    "XOP Oil & Gas ETF":  {"sym": "XOP",      "type": "etf",     "group": "macro"},
-    "ExxonMobil":         {"sym": "XOM",      "type": "stock",   "group": "macro"},
-    "Shell":              {"sym": "SHEL",     "type": "stock",   "group": "macro"},
-    "BP":                 {"sym": "BP",       "type": "stock",   "group": "macro"},
-    "TotalEnergies":      {"sym": "TTE",      "type": "stock",   "group": "macro"},
-    "Valero":             {"sym": "VLO",      "type": "stock",   "group": "macro"},
-    "Marathon Pete":      {"sym": "MPC",      "type": "stock",   "group": "macro"},
-    # Freight proxies
-    "Euronav (VLCC)":     {"sym": "EURN",     "type": "stock",   "group": "freight"},
-    "DHT Holdings":       {"sym": "DHT",      "type": "stock",   "group": "freight"},
-    "Frontline":          {"sym": "FRO",      "type": "stock",   "group": "freight"},
-    "Flex LNG":           {"sym": "FLNG",     "type": "stock",   "group": "freight"},
-    "Golar LNG":          {"sym": "GLNG",     "type": "stock",   "group": "freight"},
-    "BDRY Dry Bulk ETF":  {"sym": "BDRY",     "type": "etf",     "group": "freight"},
-    # Macro
-    "DXY (USD Index)":    {"sym": "DXY",      "type": "index",   "group": "macro"},
-    "US 10Y Yield":       {"sym": "TNX",      "type": "index",   "group": "macro"},
-    "VIX":                {"sym": "VIX",      "type": "index",   "group": "macro"},
-    "EUR/USD":            {"sym": "EUR/USD",  "type": "forex",   "group": "macro"},
-    "USD/CNY":            {"sym": "USD/CNY",  "type": "forex",   "group": "macro"},
+    "Henry Hub Gas":     "NATURAL_GAS_USD",
+    "Dutch TTF Gas":     "DUTCH_TTF_NATURAL_GAS_USD",
+    "JKM LNG":           "JKM_LNG_USD",
+    # Marine fuels
+    "VLSFO":             "VLSFO_USD",
+    "HSFO 380":          "HFO_380_USD",
+    "MGO":               "MGO_05S_USD",
+}
+
+# ── Twelve Data symbols (equities, ETFs, indices, forex) ─────────────────────
+TD_INSTRUMENTS = {
+    "S&P 500":           "SPX",
+    "XLE Energy ETF":    "XLE",
+    "XOP Oil & Gas":     "XOP",
+    "ExxonMobil":        "XOM",
+    "Shell":             "SHEL",
+    "BP":                "BP",
+    "TotalEnergies":     "TTE",
+    "Valero":            "VLO",
+    "Marathon Pete":     "MPC",
+    "Euronav (VLCC)":    "EURN",
+    "DHT Holdings":      "DHT",
+    "Frontline":         "FRO",
+    "Flex LNG":          "FLNG",
+    "Golar LNG":         "GLNG",
+    "BDRY Dry Bulk":     "BDRY",
+    "Gold":              "XAU/USD",
+    "Copper":            "XCU/USD",
+    "Silver":            "XAG/USD",
+    "DXY":               "DXY",
+    "US 10Y Yield":      "TNX",
+    "VIX":               "VIX",
+    "EUR/USD":           "EUR/USD",
+    "USD/CNY":           "USD/CNY",
 }
 
 NEWS_FEEDS = [
@@ -96,118 +108,149 @@ NEWS_FEEDS = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DATA FETCHING — Twelve Data
+# DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_price_cache = {}
-_cache_time  = {}
-CACHE_TTL    = 300  # 5 minutes
-
-def td_get(endpoint: str, params: dict) -> dict:
-    """Call Twelve Data API."""
+def oil_latest(code: str) -> dict | None:
+    """Fetch latest price from OilPriceAPI."""
     try:
-        params["apikey"] = TD_KEY
-        r = requests.get(f"{TD_BASE}/{endpoint}", params=params, timeout=10)
-        return r.json()
+        r = requests.get(f"{OIL_BASE}/prices/latest",
+                         params={"by_code": code}, headers=OIL_HDR, timeout=8)
+        d = r.json()
+        if d.get("status") != "success":
+            return None
+        price = float(d["data"]["price"])
+        return {"price": price, "chg": 0, "pct": 0}
     except Exception:
-        return {}
-
-
-def fetch_price(sym: str) -> dict | None:
-    """Fetch latest price + previous close for one symbol."""
-    now = datetime.utcnow().timestamp()
-    if sym in _price_cache and now - _cache_time.get(sym, 0) < CACHE_TTL:
-        return _price_cache[sym]
-
-    # Use /quote which gives price + previous close in one call
-    d = td_get("quote", {"symbol": sym})
-    if "close" not in d and "price" not in d:
         return None
 
+
+def oil_past_week(code: str) -> list:
+    """Fetch past week of prices from OilPriceAPI."""
     try:
+        r = requests.get(f"{OIL_BASE}/prices/past_week",
+                         params={"by_code": code}, headers=OIL_HDR, timeout=8)
+        d = r.json()
+        if d.get("status") != "success":
+            return []
+        return d.get("data", [])
+    except Exception:
+        return []
+
+
+def oil_past_day(code: str) -> dict | None:
+    """Get today + yesterday to calculate change."""
+    pts = oil_past_week(code)
+    if len(pts) < 2:
+        p = oil_latest(code)
+        return p
+    try:
+        latest = float(pts[0]["price"])
+        prev   = float(pts[1]["price"])
+        chg    = latest - prev
+        pct    = (chg / prev * 100) if prev else 0
+        return {"price": latest, "chg": chg, "pct": pct}
+    except Exception:
+        return None
+
+
+def fetch_oil_history(code: str, days: int = 365) -> pd.DataFrame:
+    """Fetch historical prices from OilPriceAPI."""
+    try:
+        end   = datetime.utcnow()
+        start = end - timedelta(days=days)
+        r = requests.get(f"{OIL_BASE}/prices",
+                         params={
+                             "by_code": code,
+                             "by_period": "daily",
+                             "start_at": start.strftime("%Y-%m-%dT00:00:00Z"),
+                             "end_at":   end.strftime("%Y-%m-%dT23:59:59Z"),
+                         },
+                         headers=OIL_HDR, timeout=15)
+        d = r.json()
+        if d.get("status") != "success":
+            return pd.DataFrame()
+        pts = d.get("data", [])
+        if not pts:
+            return pd.DataFrame()
+        df = pd.DataFrame(pts)
+        df["date"]  = pd.to_datetime(df["created_at"]).dt.normalize()
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df = df.groupby("date")["price"].last().reset_index()
+        df = df.set_index("date").sort_index().dropna()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def td_quote(sym: str) -> dict | None:
+    """Fetch quote from Twelve Data."""
+    try:
+        r = requests.get(f"{TD_BASE}/quote",
+                         params={"symbol": sym, "apikey": TD_KEY}, timeout=8)
+        d = r.json()
+        if "code" in d:
+            return None
         price = float(d.get("close") or d.get("price") or 0)
         prev  = float(d.get("previous_close") or price)
         chg   = price - prev
         pct   = (chg / prev * 100) if prev else 0
-        result = {"price": price, "chg": chg, "pct": pct}
-        _price_cache[sym]  = result
-        _cache_time[sym]   = now
-        return result
+        return {"price": price, "chg": chg, "pct": pct}
     except Exception:
         return None
 
 
-def fetch_all_prices() -> dict:
-    """Fetch prices for all instruments. Returns {name: {price, chg, pct}}"""
-    # Batch fetch using /batch_price_quote — up to 120 symbols per call
-    symbols = [v["sym"] for v in INSTRUMENTS.values()]
-    sym_str = ",".join(symbols)
-
-    result = {}
+def td_history(sym: str, days: int = 365) -> pd.DataFrame:
+    """Fetch time series from Twelve Data."""
     try:
-        d = td_get("batch_price_quote", {"symbol": sym_str})
-        # Response is a dict of {symbol: quote_data} or list
-        if isinstance(d, dict):
-            quotes = d
-        elif isinstance(d, list):
-            quotes = {item.get("symbol", ""): item for item in d}
-        else:
-            quotes = {}
-
-        for name, info in INSTRUMENTS.items():
-            sym  = info["sym"]
-            q    = quotes.get(sym, {})
-            if not q or "code" in q:
-                continue
-            try:
-                price = float(q.get("close") or q.get("price") or 0)
-                prev  = float(q.get("previous_close") or price)
-                chg   = price - prev
-                pct   = (chg / prev * 100) if prev else 0
-                result[name] = {"price": price, "chg": chg, "pct": pct,
-                                 "sym": sym, "group": info["group"]}
-            except Exception:
-                continue
+        end   = datetime.utcnow()
+        start = end - timedelta(days=days)
+        r = requests.get(f"{TD_BASE}/time_series", params={
+            "symbol":     sym,
+            "interval":   "1day",
+            "start_date": start.strftime("%Y-%m-%d"),
+            "end_date":   end.strftime("%Y-%m-%d"),
+            "outputsize": min(days, 5000),
+            "apikey":     TD_KEY,
+        }, timeout=15)
+        d = r.json()
+        vals = d.get("values", [])
+        if not vals:
+            return pd.DataFrame()
+        df = pd.DataFrame(vals)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df["price"]    = pd.to_numeric(df["close"], errors="coerce")
+        return df.set_index("datetime").sort_index()[["price"]].dropna()
     except Exception:
-        pass
+        return pd.DataFrame()
 
-    # Fallback: if batch failed, try individual fetches for key instruments
-    if not result:
-        key_instruments = {
-            k: v for k, v in INSTRUMENTS.items()
-            if k in ["Brent Crude", "WTI Crude", "Natural Gas", "Gold",
-                     "XLE Energy ETF", "DXY (USD Index)"]
-        }
-        for name, info in key_instruments.items():
-            r = fetch_price(info["sym"])
-            if r:
-                result[name] = {**r, "sym": info["sym"], "group": info["group"]}
+
+def fetch_all_prices() -> dict:
+    """Fetch all prices — oil via OilPriceAPI, equities via Twelve Data."""
+    result = {}
+
+    # Commodity prices via OilPriceAPI
+    for name, code in OIL_COMMODITIES.items():
+        p = oil_past_day(code)
+        if p:
+            result[name] = {**p, "source": "oil"}
+
+    # Equity/macro prices via Twelve Data
+    for name, sym in TD_INSTRUMENTS.items():
+        p = td_quote(sym)
+        if p:
+            result[name] = {**p, "source": "td", "sym": sym}
 
     return result
 
 
-def fetch_history(sym: str, period_days: int = 365) -> pd.DataFrame:
-    """Fetch OHLCV history from Twelve Data."""
-    end   = datetime.utcnow()
-    start = end - timedelta(days=period_days)
-    d = td_get("time_series", {
-        "symbol":     sym,
-        "interval":   "1day",
-        "start_date": start.strftime("%Y-%m-%d"),
-        "end_date":   end.strftime("%Y-%m-%d"),
-        "outputsize": period_days,
-    })
-    try:
-        values = d.get("values", [])
-        if not values:
-            return pd.DataFrame()
-        df = pd.DataFrame(values)
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df["close"]    = pd.to_numeric(df["close"], errors="coerce")
-        df = df.set_index("datetime").sort_index()
-        return df[["close"]].dropna().rename(columns={"close": "price"})
-    except Exception:
-        return pd.DataFrame()
+def fetch_history_for(name: str, days: int = 365) -> pd.DataFrame:
+    """Fetch history for a named instrument."""
+    if name in OIL_COMMODITIES:
+        return fetch_oil_history(OIL_COMMODITIES[name], days)
+    elif name in TD_INSTRUMENTS:
+        return td_history(TD_INSTRUMENTS[name], days)
+    return pd.DataFrame()
 
 
 def fetch_eia(series_id: str, length: int = 104) -> pd.DataFrame:
@@ -266,7 +309,7 @@ def fetch_news() -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# UI COMPONENTS
+# UI HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def sec_header(title: str, sub: str = "") -> html.Div:
@@ -303,20 +346,17 @@ def empty_card(name: str) -> dbc.Col:
     xs=6, sm=4, md=3, lg=2, style={"marginBottom": "10px"})
 
 
-def price_row_cards(names: list, prices: dict) -> dbc.Row:
-    cards = []
-    for n in names:
-        if n in prices:
-            cards.append(price_card(n, prices[n]))
-        else:
-            cards.append(empty_card(n))
-    return dbc.Row(cards, style={"marginBottom": "20px"})
+def price_row(names: list, prices: dict) -> dbc.Row:
+    return dbc.Row(
+        [price_card(n, prices[n]) if n in prices else empty_card(n) for n in names],
+        style={"marginBottom": "20px"}
+    )
 
 
-def line_chart(sym: str, title: str, color: str = None,
-               period_days: int = 365, height: int = 200) -> go.Figure:
+def make_line_chart(name: str, title: str, color: str = None,
+                    days: int = 365, height: int = 200) -> go.Figure:
     color = color or C["accent"]
-    df    = fetch_history(sym, period_days)
+    df    = fetch_history_for(name, days)
     fig   = go.Figure()
     if not df.empty:
         vals = df["price"].values.flatten()
@@ -327,7 +367,7 @@ def line_chart(sym: str, title: str, color: str = None,
             hovertemplate="%{y:.2f}<extra></extra>",
         ))
     else:
-        fig.add_annotation(text="Loading price history...", x=0.5, y=0.5,
+        fig.add_annotation(text="Loading...", x=0.5, y=0.5,
                            showarrow=False, font=dict(color=C["muted"], size=11))
     fig.update_layout(
         title=dict(text=title, font=dict(size=12, color=C["text"]), x=0),
@@ -341,38 +381,34 @@ def line_chart(sym: str, title: str, color: str = None,
     return fig
 
 
-def spread_chart(sym_a: str, sym_b: str, title: str,
-                 mult_a: float = 1.0, mult_b: float = 1.0,
-                 period_days: int = 365) -> go.Figure:
+def make_spread_chart(name_a: str, name_b: str, title: str,
+                      mult_a: float = 1.0, mult_b: float = 1.0,
+                      days: int = 365) -> go.Figure:
     fig = go.Figure()
     try:
-        a = fetch_history(sym_a, period_days)
-        b = fetch_history(sym_b, period_days)
+        a = fetch_history_for(name_a, days)
+        b = fetch_history_for(name_b, days)
         if a.empty or b.empty:
-            raise ValueError("no data")
+            raise ValueError()
         df = a.join(b, how="inner", lsuffix="_a", rsuffix="_b")
         df["spread"] = df["price_a"] * mult_a - df["price_b"] * mult_b
         vals = df["spread"].values.flatten()
         avg  = float(df["spread"].mean())
         col  = C["green"] if float(vals[-1]) > avg else C["red"]
-        fig.add_trace(go.Scatter(
-            x=df.index, y=vals, mode="lines",
-            line=dict(color=col, width=1.8),
-            fill="tozeroy", fillcolor=col + "12",
-            hovertemplate="%{y:.2f}<extra></extra>",
-        ))
+        fig.add_trace(go.Scatter(x=df.index, y=vals, mode="lines",
+            line=dict(color=col, width=1.8), fill="tozeroy",
+            fillcolor=col + "12", hovertemplate="%{y:.2f}<extra></extra>"))
         fig.add_hline(y=avg, line_dash="dash", line_color=C["amber"], opacity=0.5,
                       annotation_text=f"1yr avg: {avg:.2f}",
                       annotation_font_color=C["amber"], annotation_font_size=9)
         latest = float(vals[-1])
-        vs     = latest - avg
-        sign   = "+" if vs >= 0 else ""
-        acol   = C["green"] if vs >= 0 else C["red"]
-        fig.add_annotation(text=f"Now: {latest:.2f}  vs avg: {sign}{vs:.2f}",
-                           x=0.98, y=0.92, xref="paper", yref="paper",
-                           showarrow=False, font=dict(color=acol, size=10))
+        vs = latest - avg
+        fig.add_annotation(
+            text=f"Now: {latest:.2f}  vs avg: {'+' if vs>=0 else ''}{vs:.2f}",
+            x=0.98, y=0.92, xref="paper", yref="paper",
+            showarrow=False, font=dict(color=C["green"] if vs >= 0 else C["red"], size=10))
     except Exception:
-        fig.add_annotation(text="Loading spread data...", x=0.5, y=0.5,
+        fig.add_annotation(text="Loading...", x=0.5, y=0.5,
                            showarrow=False, font=dict(color=C["muted"], size=11))
     fig.update_layout(
         title=dict(text=title, font=dict(size=12, color=C["text"]), x=0),
@@ -392,21 +428,18 @@ def eia_chart(df: pd.DataFrame, title: str) -> go.Figure:
         d52  = df.tail(52)
         avg  = float(df["value"].mean())
         col  = C["red"] if float(d52["value"].iloc[-1]) > avg else C["green"]
-        fig.add_trace(go.Scatter(
-            x=d52["period"], y=d52["value"].values.flatten(),
-            mode="lines", line=dict(color=col, width=2),
-            hovertemplate="%{x|%b %d}: %{y:,.0f}<extra></extra>",
-        ))
+        fig.add_trace(go.Scatter(x=d52["period"],
+            y=d52["value"].values.flatten(), mode="lines",
+            line=dict(color=col, width=2),
+            hovertemplate="%{x|%b %d}: %{y:,.0f}<extra></extra>"))
         fig.add_hline(y=avg, line_dash="dash", line_color=C["amber"], opacity=0.6,
                       annotation_text="2yr avg", annotation_font_color=C["amber"])
         latest = float(d52["value"].iloc[-1])
         diff   = latest - avg
-        sign   = "+" if diff >= 0 else ""
         fig.add_annotation(
-            text=f"vs avg: {sign}{diff:,.0f}k",
+            text=f"vs avg: {'+' if diff>=0 else ''}{diff:,.0f}k",
             x=0.98, y=0.95, xref="paper", yref="paper",
-            showarrow=False, font=dict(color=col, size=10),
-        )
+            showarrow=False, font=dict(color=col, size=10))
     else:
         fig.add_annotation(text="Fetching EIA data...", x=0.5, y=0.5,
                            showarrow=False, font=dict(color=C["muted"], size=11))
@@ -448,7 +481,7 @@ def news_card(a: dict) -> html.Div:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB STYLES
+# LAYOUT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 TS = {"color": C["muted"], "backgroundColor": "transparent", "border": "none",
@@ -456,15 +489,10 @@ TS = {"color": C["muted"], "backgroundColor": "transparent", "border": "none",
 TS_SEL = {**TS, "color": C["accent"],
           "borderBottom": f"2px solid {C['accent']}", "fontWeight": "600"}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# LAYOUT
-# ═══════════════════════════════════════════════════════════════════════════════
-
 app.layout = html.Div(
     style={"background": C["bg"], "minHeight": "100vh",
            "fontFamily": "'Inter','Segoe UI',sans-serif"},
     children=[
-        # Header
         html.Div([
             dbc.Row([
                 dbc.Col([
@@ -473,9 +501,8 @@ app.layout = html.Div(
                               style={"color": C["text"], "fontSize": "15px",
                                      "fontWeight": "700", "letterSpacing": "2px"}),
                 ], width="auto"),
-                dbc.Col(html.Div(id="ts",
-                                 style={"color": C["muted"], "fontSize": "11px",
-                                        "textAlign": "right", "paddingTop": "4px"})),
+                dbc.Col(html.Div(id="ts", style={"color": C["muted"], "fontSize": "11px",
+                                                   "textAlign": "right", "paddingTop": "4px"})),
                 dbc.Col(dbc.Button("↻ Refresh", id="refresh-btn", size="sm",
                                    style={"background": C["accent"]+"22",
                                           "border": f"1px solid {C['accent']}55",
@@ -483,12 +510,9 @@ app.layout = html.Div(
                                           "borderRadius": "6px"}),
                         width="auto"),
             ], align="center", style={"padding": "12px 0"}),
-        ], style={"background": C["surface"],
-                  "borderBottom": f"1px solid {C['border']}",
-                  "padding": "0 20px", "position": "sticky",
-                  "top": "0", "zIndex": "100"}),
+        ], style={"background": C["surface"], "borderBottom": f"1px solid {C['border']}",
+                  "padding": "0 20px", "position": "sticky", "top": "0", "zIndex": "100"}),
 
-        # Tabs
         dcc.Tabs(id="tabs", value="crude",
                  style={"background": C["surface"],
                         "borderBottom": f"1px solid {C['border']}"},
@@ -503,7 +527,6 @@ app.layout = html.Div(
         ]),
 
         html.Div(id="content", style={"padding": "20px 24px"}),
-
         dcc.Interval(id="interval", interval=300_000, n_intervals=0),
         dcc.Store(id="store"),
     ]
@@ -535,37 +558,44 @@ def render(tab, prices):
 
     # ── CRUDE OIL ─────────────────────────────────────────────────────────────
     if tab == "crude":
-        crude_names = ["Brent Crude", "WTI Crude"]
-        brent = prices.get("Brent Crude", {}).get("price", 0)
-        wti   = prices.get("WTI Crude",   {}).get("price", 0)
+        crude_names = ["Brent Crude", "WTI Crude", "Dubai Crude",
+                       "Urals Crude", "WTI Midland", "OPEC Basket"]
+
+        brent = prices.get("Brent Crude",  {}).get("price", 0)
+        wti   = prices.get("WTI Crude",    {}).get("price", 0)
+        dubai = prices.get("Dubai Crude",  {}).get("price", 0)
+        urals = prices.get("Urals Crude",  {}).get("price", 0)
 
         spread_strip = dbc.Row([
             dbc.Col(html.Div([
-                html.Div("Brent – WTI spread", style={"fontSize":"11px","color":C["muted"]}),
-                html.Div(f"${brent - wti:.2f}/bbl" if brent and wti else "—",
+                html.Div("Brent – WTI", style={"fontSize":"11px","color":C["muted"]}),
+                html.Div(f"${brent-wti:.2f}/bbl" if brent and wti else "—",
                          style={"fontSize":"18px","fontWeight":"600",
-                                "color": C["green"] if brent > wti else C["red"]}),
+                                "color":C["green"] if brent>wti else C["red"]}),
                 html.Div("Atlantic arb / US export driver",
                          style={"fontSize":"10px","color":C["muted"]}),
             ], style={"background":C["card"],"borderRadius":"8px",
                       "padding":"10px 14px","border":f"1px solid {C['border']}"}), md=3),
             dbc.Col(html.Div([
-                html.Div("Brent time spread (M1–M2)", style={"fontSize":"11px","color":C["muted"]}),
-                html.Div("See ICE futures", style={"fontSize":"14px","color":C["muted"]}),
-                html.Div("Backwardation = physical tightness",
+                html.Div("Brent – Dubai (EFS proxy)", style={"fontSize":"11px","color":C["muted"]}),
+                html.Div(f"${brent-dubai:.2f}/bbl" if brent and dubai else "—",
+                         style={"fontSize":"18px","fontWeight":"600",
+                                "color":C["green"] if brent>dubai else C["red"]}),
+                html.Div("Drives east/west crude routing",
                          style={"fontSize":"10px","color":C["muted"]}),
             ], style={"background":C["card"],"borderRadius":"8px",
                       "padding":"10px 14px","border":f"1px solid {C['border']}"}), md=3),
             dbc.Col(html.Div([
-                html.Div("Brent–Dubai EFS", style={"fontSize":"11px","color":C["muted"]}),
-                html.Div("Drives E/W routing", style={"fontSize":"14px","color":C["muted"]}),
-                html.Div("High EFS → Atlantic crude flows to Asia",
+                html.Div("Urals discount to Brent", style={"fontSize":"11px","color":C["muted"]}),
+                html.Div(f"${urals-brent:.2f}/bbl" if brent and urals else "—",
+                         style={"fontSize":"18px","fontWeight":"600","color":C["amber"]}),
+                html.Div("Russian crude discount — sanctions signal",
                          style={"fontSize":"10px","color":C["muted"]}),
             ], style={"background":C["card"],"borderRadius":"8px",
                       "padding":"10px 14px","border":f"1px solid {C['border']}"}), md=3),
             dbc.Col(html.Div([
                 html.Div("OPEC+ spare capacity", style={"fontSize":"11px","color":C["muted"]}),
-                html.Div("~3mb/d est.", style={"fontSize":"14px","color":C["amber"]}),
+                html.Div("~3mb/d est.", style={"fontSize":"18px","fontWeight":"600","color":C["amber"]}),
                 html.Div("Low spare = high geopolitical premium",
                          style={"fontSize":"10px","color":C["muted"]}),
             ], style={"background":C["card"],"borderRadius":"8px",
@@ -573,13 +603,13 @@ def render(tab, prices):
         ], style={"marginBottom":"20px"})
 
         charts = dbc.Row([
-            dbc.Col(dcc.Graph(figure=line_chart("BCO/USD","Brent Crude — 1yr",C["accent"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Brent Crude","Brent Crude — 1yr",C["accent"]),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=line_chart("WTI/USD","WTI Crude — 1yr",C["teal"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("WTI Crude","WTI Crude — 1yr",C["teal"]),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=spread_chart("BCO/USD","WTI/USD","Brent – WTI Spread $/bbl"),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("Brent Crude","WTI Crude","Brent – WTI Spread $/bbl"),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=line_chart("BCO/USD","Brent — 5yr",C["purple"],period_days=1825,height=200),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("Brent Crude","Dubai Crude","Brent – Dubai Spread $/bbl"),
                               config={"displayModeBar":False}), md=6),
         ], style={"marginBottom":"20px"})
 
@@ -588,7 +618,7 @@ def render(tab, prices):
         inv_row = dbc.Row([
             dbc.Col(dcc.Graph(figure=eia_chart(eia_crude,"US Crude Stocks (k bbls) — EIA weekly"),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=eia_chart(eia_cush, "Cushing OK Stocks (k bbls) — WTI delivery point"),
+            dbc.Col(dcc.Graph(figure=eia_chart(eia_cush, "Cushing OK Stocks (k bbls) — WTI delivery"),
                               config={"displayModeBar":False}), md=6),
         ], style={"marginBottom":"20px"})
 
@@ -602,32 +632,32 @@ def render(tab, prices):
                     "Production ~13.5mb/d. Responds to price with 3-6 month lag. Permian drives marginal growth. "
                     "Baker Hughes rig count (Fridays) = leading indicator for supply 6 months out.", C["teal"]),
                 info_box("Russia Post-Sanctions",
-                    "Official production ~9.2mb/d. Most Urals going to India/China at $10-15 discount to Brent. "
-                    "Shadow fleet (~600 vessels) carries this flow. Discount compression = bearish for Urals.", C["purple"]),
+                    "Most Urals going to India/China at discount to Brent. "
+                    "Shadow fleet (~600 vessels) carries this flow. "
+                    "Discount compression = less incentive for buyers.", C["purple"]),
             ], md=6),
             dbc.Col([
                 info_box("China Demand",
                     "~16mb/d, world's largest crude importer. Key signals: customs data (monthly crude imports), "
-                    "teapot refinery runs, SPR build/draw cycles. EV penetration ~35% new car sales — "
-                    "structural headwind for gasoline demand.", C["green"]),
+                    "teapot refinery runs, SPR build/draw cycles. EV penetration ~35% new car sales.", C["green"]),
                 info_box("How Dated Brent is Set",
                     "Physical price set in the Platts Price Window, 4:00-4:30pm London daily. "
                     "BFOET basket (Brent, Forties, Oseberg, Ekofisk, Troll). "
-                    "Forties usually cheapest and price-setting. Physical tightness here drives paper.", C["accent"]),
+                    "Forties usually cheapest and price-setting.", C["accent"]),
                 info_box("Geopolitical Premium",
-                    "Strait of Hormuz: 20% of global oil flows. EIA April 2026 forecast: "
-                    "Brent peaking ~$115/b in Q2 2026 on Hormuz closure risk, with 7.5mb/d of "
-                    "Gulf production shut in. Options skew = market-implied risk premium.", C["red"]),
+                    "Strait of Hormuz: ~20% of global oil flows. "
+                    "EIA April 2026: Brent forecast to peak ~$115/b on Hormuz closure risk, "
+                    "with 7.5mb/d of Gulf production shut in.", C["red"]),
             ], md=6),
         ])
 
         return html.Div([
-            sec_header("Crude Oil", "Brent, WTI, spreads, EIA inventories, fundamentals"),
-            price_row_cards(crude_names, prices),
+            sec_header("Crude Oil", "Brent, WTI, Dubai, Urals — live prices, spreads, inventories"),
+            price_row(crude_names, prices),
             spread_strip,
             sec_header("Price History & Spreads",""),
             charts,
-            sec_header("EIA Inventories","Wednesday release, 10:30am ET — most market-moving weekly data in oil"),
+            sec_header("EIA Inventories","Wednesday release 10:30am ET — most market-moving weekly data in oil"),
             inv_row,
             sec_header("Fundamental Context",""),
             context,
@@ -635,7 +665,9 @@ def render(tab, prices):
 
     # ── PRODUCTS ──────────────────────────────────────────────────────────────
     elif tab == "products":
-        prod_names = ["Gasoline (RBOB)", "Heating Oil"]
+        prod_names = ["Gasoline (RBOB)", "ULSD Diesel", "Jet Fuel",
+                      "Heating Oil", "VLSFO", "HSFO 380", "MGO"]
+
         eia_gas  = fetch_eia("WGTSTUS1", 104)
         eia_dist = fetch_eia("WDISTUS1", 104)
         eia_util = fetch_eia("WPULEUS3", 104)
@@ -650,90 +682,140 @@ def render(tab, prices):
         ], style={"marginBottom":"20px"})
 
         crack_row = dbc.Row([
-            dbc.Col(dcc.Graph(figure=spread_chart("RB=F","BCO/USD","Gasoline Crack vs Brent $/bbl",mult_a=42.0),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("Gasoline (RBOB)","Brent Crude",
+                              "Gasoline Crack vs Brent $/gal"),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=spread_chart("HO=F","BCO/USD","Diesel Crack vs Brent $/bbl",mult_a=42.0),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("ULSD Diesel","Brent Crude",
+                              "Diesel Crack vs Brent $/gal"),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=spread_chart("RB=F","WTI/USD","Gasoline Crack vs WTI $/bbl",mult_a=42.0),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("Jet Fuel","Brent Crude",
+                              "Jet Fuel Crack vs Brent $/gal"),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=spread_chart("HO=F","WTI/USD","Diesel Crack vs WTI $/bbl",mult_a=42.0),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("ULSD Diesel","Gasoline (RBOB)",
+                              "Diesel – Gasoline Spread"),
                               config={"displayModeBar":False}), md=6),
+        ], style={"marginBottom":"20px"})
+
+        marine_row = dbc.Row([
+            dbc.Col(dcc.Graph(figure=make_line_chart("VLSFO","VLSFO (IMO 2020 bunker fuel)",C["teal"]),
+                              config={"displayModeBar":False}), md=4),
+            dbc.Col(dcc.Graph(figure=make_line_chart("HSFO 380","HSFO 380 (high sulphur fuel oil)",C["red"]),
+                              config={"displayModeBar":False}), md=4),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("VLSFO","HSFO 380","VLSFO–HSFO spread (Hi-5)"),
+                              config={"displayModeBar":False}), md=4),
         ], style={"marginBottom":"20px"})
 
         context = dbc.Row([
             dbc.Col([
-                info_box("How Crack Spreads Work",
+                info_box("Crack Spreads",
                     "Crack spread = product price − crude. Measures refinery profitability. "
                     "High cracks → refiners run hard → more crude demand → bullish crude. "
                     "3-2-1 crack = (2×gasoline + 1×diesel − 3×crude) / 3.", C["accent"]),
                 info_box("Gasoline Seasonality",
-                    "US driving season Memorial Day → Labor Day (May–Sept). Gasoline crack peaks spring/summer. "
-                    "RVP spec changes in summer require different blending — tightens supply temporarily.", C["green"]),
+                    "US driving season Memorial Day → Labor Day (May–Sept). "
+                    "Gasoline crack peaks spring/summer. RVP spec changes in summer tighten supply.", C["green"]),
             ], md=6),
             dbc.Col([
-                info_box("Diesel / Distillate",
-                    "Diesel is the industrial fuel — strongest demand signal for global growth. "
-                    "Heating oil peaks Q4/Q1. Jet fuel crack now strongest product margin globally. "
-                    "IMO 2020 tightened bunker fuel specs — created VLSFO/HSFO spread.", C["amber"]),
-                info_box("Refinery Utilisation",
-                    "US utilisation above 90% = running near capacity. "
-                    "Seasonal maintenance (March–April, Sept–Oct) drops runs, tightens product supply, "
-                    "widens cracks temporarily. Watch for unplanned outages as extra bullish signal.", C["teal"]),
+                info_box("Marine Fuels — IMO 2020",
+                    "IMO 2020 capped sulphur in bunker fuel at 0.5% (from 3.5%). "
+                    "Created VLSFO demand and Hi-5 spread (VLSFO vs HSFO). "
+                    "Hi-5 spread is a key signal for refinery complexity margins.", C["amber"]),
+                info_box("Jet Fuel Recovery",
+                    "Jet fuel crack now strongest product margin globally as aviation recovers. "
+                    "Watch IATA monthly passenger data — leading indicator for jet demand. "
+                    "Asia-Pacific recovery the key swing factor.", C["teal"]),
             ], md=6),
         ])
 
         return html.Div([
-            sec_header("Refined Products","Gasoline, diesel, jet — crack spreads and inventories"),
-            price_row_cards(prod_names, prices),
+            sec_header("Refined Products & Marine Fuels",
+                       "Gasoline, diesel, jet, heating oil, VLSFO, HSFO — crack spreads and inventory"),
+            price_row(prod_names, prices),
             sec_header("EIA Product Inventories & Refinery Runs",""),
             inv_row,
-            sec_header("Crack Spreads — 1yr History","Refinery margins vs crude"),
+            sec_header("Crack Spreads — 1yr",""),
             crack_row,
+            sec_header("Marine Fuels & Hi-5 Spread",""),
+            marine_row,
             sec_header("Context",""),
             context,
         ])
 
     # ── GAS & LNG ─────────────────────────────────────────────────────────────
     elif tab == "gas":
-        gas_names = ["Natural Gas", "Flex LNG", "Golar LNG"]
+        gas_names = ["Henry Hub Gas", "Dutch TTF Gas", "JKM LNG",
+                     "Flex LNG", "Golar LNG"]
+
+        henry = prices.get("Henry Hub Gas", {}).get("price", 0)
+        ttf   = prices.get("Dutch TTF Gas", {}).get("price", 0)
+        jkm   = prices.get("JKM LNG",       {}).get("price", 0)
+
+        spread_strip = dbc.Row([
+            dbc.Col(html.Div([
+                html.Div("Henry Hub ($/MMBtu)", style={"fontSize":"11px","color":C["muted"]}),
+                html.Div(f"${henry:.2f}" if henry else "—",
+                         style={"fontSize":"18px","fontWeight":"600","color":C["teal"]}),
+                html.Div("US benchmark — export LNG base cost",
+                         style={"fontSize":"10px","color":C["muted"]}),
+            ], style={"background":C["card"],"borderRadius":"8px",
+                      "padding":"10px 14px","border":f"1px solid {C['border']}"}), md=4),
+            dbc.Col(html.Div([
+                html.Div("Dutch TTF ($/MMBtu equiv)", style={"fontSize":"11px","color":C["muted"]}),
+                html.Div(f"${ttf:.2f}" if ttf else "—",
+                         style={"fontSize":"18px","fontWeight":"600","color":C["accent"]}),
+                html.Div("European gas benchmark",
+                         style={"fontSize":"10px","color":C["muted"]}),
+            ], style={"background":C["card"],"borderRadius":"8px",
+                      "padding":"10px 14px","border":f"1px solid {C['border']}"}), md=4),
+            dbc.Col(html.Div([
+                html.Div("JKM LNG ($/MMBtu)", style={"fontSize":"11px","color":C["muted"]}),
+                html.Div(f"${jkm:.2f}" if jkm else "—",
+                         style={"fontSize":"18px","fontWeight":"600","color":C["purple"]}),
+                html.Div("Asian LNG spot — routing signal",
+                         style={"fontSize":"10px","color":C["muted"]}),
+            ], style={"background":C["card"],"borderRadius":"8px",
+                      "padding":"10px 14px","border":f"1px solid {C['border']}"}), md=4),
+        ], style={"marginBottom":"20px"})
 
         charts = dbc.Row([
-            dbc.Col(dcc.Graph(figure=line_chart("NG=F","Henry Hub Natural Gas — 1yr",C["teal"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Henry Hub Gas","Henry Hub — 1yr",C["teal"]),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=line_chart("NG=F","Henry Hub — 5yr",C["teal"],period_days=1825),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Dutch TTF Gas","Dutch TTF Gas — 1yr",C["accent"]),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=line_chart("FLNG","Flex LNG — LNG shipping proxy",C["accent"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("JKM LNG","JKM LNG — 1yr",C["purple"]),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=line_chart("GLNG","Golar LNG — LNG midstream proxy",C["purple"]),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("Dutch TTF Gas","Henry Hub Gas",
+                              "TTF – Henry Hub Spread (European vs US gas)"),
                               config={"displayModeBar":False}), md=6),
         ], style={"marginBottom":"20px"})
 
         context = dbc.Row([
             dbc.Col([
-                info_box("TTF vs Henry Hub vs JKM",
-                    "Three gas benchmarks: TTF (European, €/MWh), Henry Hub (US, $/MMBtu), "
-                    "JKM (Asian LNG spot, $/MMBtu). US LNG goes east if JKM > HH + $3 liquefaction + freight. "
-                    "Goes to Europe if TTF > JKM + freight. The spread drives global LNG routing.", C["teal"]),
+                info_box("The LNG Routing Decision",
+                    "US LNG goes east if JKM > Henry Hub + $3 liquefaction + freight (~$1-2). "
+                    "Goes to Europe if TTF > JKM + freight. This spread drives real-time routing decisions "
+                    "by Vitol, Shell, TotalEnergies on every cargo.", C["teal"]),
                 info_box("European Gas Storage",
                     "GIE AGSI data — % full vs seasonal norms. EU winter target ~90% full. "
                     "Summer injection season April–October. Storage deficit = TTF bullish. "
                     "Russia pipeline gas now minimal — Europe structurally dependent on LNG.", C["amber"]),
             ], md=6),
             dbc.Col([
-                info_box("LNG Trade Flows",
-                    "US now world's largest LNG exporter (~14 bcf/d). Key exporters: US, Qatar, Australia, Russia. "
-                    "Key importers: Japan, China, South Korea, Europe. "
-                    "Cold snap in NE Asia spikes JKM $3-5 in days — diverts Atlantic cargoes eastward.", C["accent"]),
-                info_box("Seasonal Patterns",
-                    "Gas demand peaks: winter heating (Dec–Feb) and summer power gen (Jul–Aug). "
-                    "Spring/autumn shoulder season = weakest demand, storage injection. "
-                    "Weather forecasts 2 weeks out = biggest short-term price driver in gas.", C["green"]),
+                info_box("JKM Volatility",
+                    "Asian LNG spot is the most volatile benchmark. Cold snap in NE Asia "
+                    "spikes JKM $3-5 in days — diverts Atlantic cargoes eastward immediately. "
+                    "Japan/Korea nuclear outages also drive demand spikes.", C["purple"]),
+                info_box("US LNG Export Capacity",
+                    "US now world's largest LNG exporter (~14 bcf/d). "
+                    "Sabine Pass, Freeport, Corpus Christi, Cameron are key terminals. "
+                    "Any outage (like Freeport 2022) removes supply and spikes TTF.", C["green"]),
             ], md=6),
         ])
 
         return html.Div([
-            sec_header("Natural Gas & LNG","Henry Hub, TTF, JKM, LNG trade flows and shipping"),
-            price_row_cards(gas_names, prices),
+            sec_header("Natural Gas & LNG", "Henry Hub, TTF, JKM — the three global gas benchmarks"),
+            price_row(gas_names, prices),
+            spread_strip,
             sec_header("Price History",""),
             charts,
             sec_header("Fundamental Context",""),
@@ -743,79 +825,75 @@ def render(tab, prices):
     # ── FREIGHT ───────────────────────────────────────────────────────────────
     elif tab == "freight":
         freight_names = ["Euronav (VLCC)","DHT Holdings","Frontline",
-                         "Flex LNG","Golar LNG","BDRY Dry Bulk ETF"]
+                         "Flex LNG","Golar LNG","BDRY Dry Bulk"]
 
         charts = dbc.Row([
-            dbc.Col(dcc.Graph(figure=line_chart("EURN","Euronav — VLCC proxy",C["accent"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Euronav (VLCC)","Euronav — VLCC proxy",C["accent"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("FRO", "Frontline — tanker proxy",C["teal"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Frontline","Frontline — tanker proxy",C["teal"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("BDRY","BDRY — Baltic Dry ETF",C["amber"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("BDRY Dry Bulk","BDRY — Baltic Dry ETF",C["amber"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("FLNG","Flex LNG — LNG shipping",C["purple"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Flex LNG","Flex LNG — LNG shipping",C["purple"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("DHT", "DHT Holdings — VLCC",C["green"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("DHT Holdings","DHT Holdings — VLCC",C["green"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("GLNG","Golar LNG",C["muted"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Golar LNG","Golar LNG",C["muted"]),
                               config={"displayModeBar":False}), md=4),
         ], style={"marginBottom":"20px"})
 
         routes = [
             ("TD3C — VLCC (ME Gulf → China)", C["accent"],
              "Benchmark VLCC route, 2mb cargo. Rates driven by OPEC+ export volumes and Chinese crude demand. "
-             "High Worldscale = tight tonnage = bullish crude demand signal. Euronav, DHT, Frontline are proxies."),
+             "High Worldscale = tight tonnage = bullish crude demand. Euronav, DHT, Frontline are proxies."),
             ("TD20 — Suezmax (W.Africa → Europe)", C["teal"],
              "Key for Nigerian/Angolan crude into European refineries. "
-             "Rates rise when Atlantic basin crude flows strongly westward. Torm, Hafnia are listed proxies."),
+             "Rates rise when Atlantic basin crude flows strongly westward."),
             ("LNG Shipping", C["purple"],
-             "Spot day rates range $40-180k/day. Spike in winter on NE Asia demand. Low in summer shoulder. "
-             "Flex LNG and Golar LNG are listed proxies. TTF-JKM spread drives routing decisions."),
-            ("Baltic Dry Index (BDI)", C["amber"],
+             "Spot day rates range $40-180k/day. Spike in winter on NE Asia demand. "
+             "Low in summer shoulder. Flex LNG and Golar LNG are listed proxies."),
+            ("Baltic Dry Index", C["amber"],
              "Dry bulk: iron ore, coal, grain. Capesize (iron ore/coal), Panamax (grain/coal). "
-             "BDI as global industrial demand barometer — rising BDI = rising Chinese steel production."),
+             "Rising BDI = rising Chinese steel production = industrial demand signal."),
             ("TC2 — MR Tanker (ARA → USAC)", C["green"],
-             "Clean products tanker route. Tight TC2 = strong transatlantic gasoline arb flowing. "
-             "Watches colonial pipeline and ARA product stock levels."),
+             "Clean products tanker route. Tight TC2 = strong transatlantic gasoline arb. "
+             "Watches Colonial Pipeline and ARA product stock levels."),
             ("Shadow Fleet", C["red"],
              "~600-700 vessels carrying Russian/Iranian/Venezuelan crude. Absorbs global tanker capacity. "
-             "When shadow fleet utilisation rises, mainstream freight tightens. Track via Kpler AIS data."),
+             "When shadow fleet utilisation rises, mainstream freight tightens. Track via Kpler AIS."),
         ]
-
-        route_cards = dbc.Row([
-            dbc.Col(info_box(t, b, c), md=6) for t, c, b in routes
-        ])
 
         return html.Div([
             sec_header("Freight & Shipping","Tanker rates, dry bulk, LNG shipping — listed equity proxies"),
-            price_row_cards(freight_names, prices),
+            price_row(freight_names, prices),
             sec_header("Shipping Equity Proxies — 1yr",""),
             charts,
-            sec_header("Key Routes & What They Signal",""),
-            route_cards,
+            sec_header("Key Routes & Signals",""),
+            dbc.Row([dbc.Col(info_box(t, b, c), md=6) for t, c, b in routes]),
         ])
 
     # ── MACRO & METALS ────────────────────────────────────────────────────────
     elif tab == "macro":
-        macro_names = ["S&P 500","XLE Energy ETF","XOP Oil & Gas ETF",
+        macro_names = ["S&P 500","XLE Energy ETF","XOP Oil & Gas",
                        "ExxonMobil","Valero","Gold","Copper",
-                       "DXY (USD Index)","US 10Y Yield","VIX","EUR/USD","USD/CNY"]
+                       "DXY","US 10Y Yield","VIX","EUR/USD","USD/CNY"]
 
         charts = dbc.Row([
-            dbc.Col(dcc.Graph(figure=line_chart("DXY",    "DXY USD Index — 1yr",C["amber"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("DXY","DXY USD Index — 1yr",C["amber"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("XAU/USD","Gold — 1yr",C["amber"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Gold","Gold — 1yr",C["amber"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("XCU/USD","Copper — 1yr",C["teal"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("Copper","Copper — 1yr",C["teal"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("TNX",    "US 10Y Yield — 1yr",C["red"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("US 10Y Yield","US 10Y Yield — 1yr",C["red"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("VIX",    "VIX — 1yr",C["purple"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("VIX","VIX — 1yr",C["purple"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=line_chart("XLE",    "XLE Energy ETF — 1yr",C["green"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("XLE Energy ETF","XLE Energy ETF — 1yr",C["green"]),
                               config={"displayModeBar":False}), md=4),
-            dbc.Col(dcc.Graph(figure=spread_chart("XCU/USD","XAU/USD","Copper/Gold Ratio (×100)",mult_a=100.0),
+            dbc.Col(dcc.Graph(figure=make_spread_chart("Copper","Gold","Copper/Gold Ratio (×100)",mult_a=100.0),
                               config={"displayModeBar":False}), md=6),
-            dbc.Col(dcc.Graph(figure=line_chart("XOP","XOP Oil & Gas ETF — 1yr",C["accent"]),
+            dbc.Col(dcc.Graph(figure=make_line_chart("XOP Oil & Gas","XOP Oil & Gas ETF — 1yr",C["accent"]),
                               config={"displayModeBar":False}), md=6),
         ], style={"marginBottom":"20px"})
 
@@ -832,11 +910,11 @@ def render(tab, prices):
             ], md=6),
             dbc.Col([
                 info_box("Energy Equities vs Crude",
-                    "XLE/XOP vs crude oil divergence is a useful signal. "
+                    "XLE/XOP vs crude divergence is a useful signal. "
                     "Equities leading crude higher = market believes crude will rise (forward-looking). "
-                    "Equities lagging crude = equity market sceptical of commodity move. "
+                    "Equities lagging crude = equity market sceptical. "
                     "HY energy credit spreads give the market's implied floor oil price.", C["green"]),
-                info_box("VIX & Commodity Vol",
+                info_box("VIX & Risk-Off",
                     "High VIX = risk-off = institutional deleveraging = all assets sold together. "
                     "In risk-off, commodities and equities correlate to 1. "
                     "After VIX spike and reversion, commodity vol often stays elevated — "
@@ -846,7 +924,7 @@ def render(tab, prices):
 
         return html.Div([
             sec_header("Macro & Metals","DXY, yields, VIX, copper, gold, energy equities"),
-            price_row_cards(macro_names, prices),
+            price_row(macro_names, prices),
             sec_header("Charts — 1yr",""),
             charts,
             sec_header("Inter-Market Signals",""),
@@ -855,7 +933,7 @@ def render(tab, prices):
 
     # ── POSITIONING ───────────────────────────────────────────────────────────
     elif tab == "position":
-        cot_df = fetch_cot()
+        cot_df    = fetch_cot()
         fig_net   = go.Figure()
         fig_gross = go.Figure()
         signal_txt = "Loading CFTC data..."
@@ -882,11 +960,9 @@ def render(tab, prices):
                 annotation_text="Crowded short", annotation_font_color=C["green"], annotation_font_size=10)
 
             fig_gross.add_trace(go.Scatter(x=dates, y=longs.values.flatten(),
-                mode="lines", name="Longs", line=dict(color=C["green"], width=1.8),
-                hovertemplate="%{x|%b %d}: %{y:,.0f}<extra></extra>"))
+                mode="lines", name="Longs", line=dict(color=C["green"], width=1.8)))
             fig_gross.add_trace(go.Scatter(x=dates, y=shorts.values.flatten(),
-                mode="lines", name="Shorts", line=dict(color=C["red"], width=1.8),
-                hovertemplate="%{x|%b %d}: %{y:,.0f}<extra></extra>"))
+                mode="lines", name="Shorts", line=dict(color=C["red"], width=1.8)))
 
             signal_col = C["red"] if net_pct > 75 else C["green"] if net_pct < 25 else C["amber"]
             signal_txt = ("⚠ Crowded long — reversal risk high"  if net_pct > 75 else
@@ -910,24 +986,11 @@ def render(tab, prices):
 
         signal_card = html.Div([
             html.Div(signal_txt, style={"fontSize":"15px","fontWeight":"700","color":signal_col}),
-            html.Div(f"Net position: {latest_net:+,} contracts  |  {net_pct}th percentile vs 1yr range",
+            html.Div(f"Net: {latest_net:+,} contracts  |  {net_pct}th percentile vs 1yr range",
                      style={"fontSize":"12px","color":C["muted"],"marginTop":"5px"}),
         ], style={"background":C["card"],"border":f"1px solid {signal_col}44",
                   "borderLeft":f"3px solid {signal_col}","borderRadius":"8px",
                   "padding":"14px 18px","marginBottom":"18px"})
-
-        context = dbc.Row([
-            dbc.Col(info_box("How to Use the COT Report",
-                "CFTC Commitment of Traders released every Friday. "
-                "Shows managed money (hedge funds/CTAs) net positioning. "
-                "Extreme net long = crowded = reversal risk on any negative catalyst. "
-                "Use as a crowding indicator, not a standalone entry signal.", C["accent"]), md=6),
-            dbc.Col(info_box("Commercials vs Specs",
-                "Commercials (producers, refiners) are predominantly short — hedging production. "
-                "If commercials are COVERING shorts, they see value at current prices. "
-                "This is the most bullish COT signal. "
-                "Swap dealers reflect institutional hedging demand — not directional.", C["amber"]), md=6),
-        ])
 
         return html.Div([
             sec_header("Positioning & COT","CFTC Commitment of Traders — managed money in WTI crude"),
@@ -936,7 +999,17 @@ def render(tab, prices):
                 dbc.Col(dcc.Graph(figure=fig_net,   config={"displayModeBar":False}), md=6),
                 dbc.Col(dcc.Graph(figure=fig_gross, config={"displayModeBar":False}), md=6),
             ], style={"marginBottom":"20px"}),
-            context,
+            dbc.Row([
+                dbc.Col(info_box("How to Use the COT Report",
+                    "CFTC Commitment of Traders released every Friday. "
+                    "Shows managed money (hedge funds/CTAs) net positioning. "
+                    "Extreme net long = crowded = reversal risk on any negative catalyst. "
+                    "Use as a crowding indicator, not a standalone entry signal.", C["accent"]), md=6),
+                dbc.Col(info_box("Commercials vs Specs",
+                    "Commercials (producers, refiners) are predominantly short — hedging production. "
+                    "If commercials are COVERING shorts, they see value at current prices. "
+                    "This is the most bullish COT signal.", C["amber"]), md=6),
+            ]),
         ])
 
     # ── NEWS ──────────────────────────────────────────────────────────────────
@@ -950,11 +1023,7 @@ def render(tab, prices):
             cols[i % 3].append(news_card(a))
         return html.Div([
             sec_header("Market News","Live feeds — Reuters, EIA, FT, Platts"),
-            dbc.Row([
-                dbc.Col(cols[0], md=4),
-                dbc.Col(cols[1], md=4),
-                dbc.Col(cols[2], md=4),
-            ]),
+            dbc.Row([dbc.Col(cols[0],md=4), dbc.Col(cols[1],md=4), dbc.Col(cols[2],md=4)]),
         ])
 
     return html.Div("Select a tab.", style={"color": C["muted"]})
