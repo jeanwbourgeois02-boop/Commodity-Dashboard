@@ -670,7 +670,14 @@ app.layout = html.Div(style={"background": C["bg"], "minHeight": "100vh",
                     style=TAB_STYLE, selected_style=TAB_SELECTED),
             dcc.Tab(label="News",              value="news",
                     style=TAB_STYLE, selected_style=TAB_SELECTED),
+            dcc.Tab(label="EIA Inventories",   value="eia",
+                    style=TAB_STYLE, selected_style=TAB_SELECTED),
+            dcc.Tab(label="COT Positioning",   value="cot",
+                    style=TAB_STYLE, selected_style=TAB_SELECTED),
+            dcc.Tab(label="Crack Spreads",     value="cracks",
+                    style=TAB_STYLE, selected_style=TAB_SELECTED),
         ]),
+        
     ]),
 
     # ── Content ───────────────────────────────────────────────────────────────
@@ -950,6 +957,144 @@ def render_tab(tab, data):
         ])
 
     return html.Div("Select a tab", style={"color": C["muted"]})
+    # ── EIA INVENTORIES ───────────────────────────────────────────────────────
+    elif tab == "eia":
+        inv = fetch_eia_inventories()
+
+        def inv_chart(key, label):
+            df = inv.get(key, pd.DataFrame())
+            fig = go.Figure()
+            if df.empty:
+                fig.add_annotation(text="Loading EIA data...", x=0.5, y=0.5,
+                                   showarrow=False, font=dict(color=C["muted"]))
+            else:
+                df2 = df.tail(52).copy()
+                fig.add_trace(go.Scatter(
+                    x=df2["period"], y=df2["value"],
+                    mode="lines", name="Actual",
+                    line=dict(color=C["accent"], width=2),
+                ))
+                avg_val = float(df["value"].mean())
+                fig.add_hline(y=avg_val, line_dash="dash", line_color=C["amber"],
+                              opacity=0.6, annotation_text="5yr avg",
+                              annotation_font_color=C["amber"])
+                latest = float(df2["value"].iloc[-1])
+                diff = latest - avg_val
+                sign = "+" if diff >= 0 else ""
+                col = C["red"] if diff >= 0 else C["green"]
+                fig.add_annotation(text=f"vs avg: {sign}{diff:,.0f}",
+                    x=0.98, y=0.95, xref="paper", yref="paper",
+                    showarrow=False, font=dict(color=col, size=11))
+            fig.update_layout(
+                title=dict(text=label, font=dict(size=12, color=C["text"]), x=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=8, r=8, t=32, b=8),
+                xaxis=dict(showgrid=False, color=C["muted"], tickfont=dict(size=9)),
+                yaxis=dict(showgrid=True, gridcolor=C["border"], color=C["muted"], tickfont=dict(size=9)),
+                height=220,
+            )
+            return fig
+
+        return html.Div([
+            section_header("EIA Weekly Inventories", "US crude & products stocks — data from EIA.gov"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(figure=inv_chart("crude",      "US Crude Stocks (k bbls)"),      config={"displayModeBar": False}), md=6),
+                dbc.Col(dcc.Graph(figure=inv_chart("gasoline",   "US Gasoline Stocks (k bbls)"),   config={"displayModeBar": False}), md=6),
+                dbc.Col(dcc.Graph(figure=inv_chart("distillate", "US Distillate Stocks (k bbls)"), config={"displayModeBar": False}), md=6),
+                dbc.Col(dcc.Graph(figure=inv_chart("refutil",    "US Refinery Utilisation (%)"),   config={"displayModeBar": False}), md=6),
+            ]),
+        ])
+
+    # ── COT POSITIONING ───────────────────────────────────────────────────────
+    elif tab == "cot":
+        cot = fetch_cot_data()
+        df_cot = cot.get("df", pd.DataFrame())
+        fig_net = go.Figure()
+        if not df_cot.empty and "m_money_positions_long_all" in df_cot.columns:
+            longs  = pd.to_numeric(df_cot["m_money_positions_long_all"],  errors="coerce")
+            shorts = pd.to_numeric(df_cot["m_money_positions_short_all"], errors="coerce")
+            net    = longs - shorts
+            colors = [C["green"] if v >= 0 else C["red"] for v in net]
+            fig_net.add_trace(go.Bar(x=df_cot["date"], y=net, marker_color=colors,
+                hovertemplate="%{x|%b %d}: %{y:,.0f} contracts<extra></extra>"))
+            latest_net = int(net.iloc[-1])
+            net_pct = int((net.iloc[-1] - net.min()) / (net.max() - net.min()) * 100)
+        else:
+            latest_net, net_pct = 0, 50
+            fig_net.add_annotation(text="Fetching CFTC data...", x=0.5, y=0.5,
+                                   showarrow=False, font=dict(color=C["muted"]))
+        fig_net.update_layout(
+            title=dict(text="WTI Crude — Managed Money Net Position", font=dict(size=12, color=C["text"]), x=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=8, r=8, t=32, b=8),
+            xaxis=dict(showgrid=False, color=C["muted"]),
+            yaxis=dict(showgrid=True, gridcolor=C["border"], color=C["muted"]),
+            height=280,
+        )
+        signal_col = C["red"] if net_pct > 75 else C["green"] if net_pct < 25 else C["amber"]
+        signal_txt = ("⚠ Crowded long — reversal risk" if net_pct > 75
+                      else "⚠ Crowded short — squeeze risk" if net_pct < 25
+                      else "Positioning neutral")
+        return html.Div([
+            section_header("COT Positioning", "CFTC Commitment of Traders — managed money in WTI crude"),
+            html.Div([
+                html.Div(signal_txt, style={"fontSize": "14px", "fontWeight": "600", "color": signal_col}),
+                html.Div(f"Net: {latest_net:+,} contracts  |  {net_pct}th percentile vs 1yr range",
+                         style={"fontSize": "11px", "color": C["muted"], "marginTop": "4px"}),
+            ], style={"background": C["card"], "border": f"1px solid {signal_col}44",
+                      "borderLeft": f"3px solid {signal_col}", "borderRadius": "8px",
+                      "padding": "14px 16px", "marginBottom": "16px"}),
+            dcc.Graph(figure=fig_net, config={"displayModeBar": False}),
+        ])
+
+    # ── CRACK SPREADS ─────────────────────────────────────────────────────────
+    elif tab == "cracks":
+        def crack_chart(prod_sym, name, crude_sym="CL=F"):
+            try:
+                prod  = fetch_history(prod_sym,  period="1y")
+                crude = fetch_history(crude_sym, period="1y")
+                fig   = go.Figure()
+                if prod.empty or crude.empty:
+                    fig.add_annotation(text="Loading...", x=0.5, y=0.5,
+                                       showarrow=False, font=dict(color=C["muted"]))
+                else:
+                    df = prod.join(crude, how="inner", lsuffix="_p", rsuffix="_c")
+                    if prod_sym in ["RB=F", "HO=F"]:
+                        df["crack"] = df["price_p"] * 42 - df["price_c"]
+                    else:
+                        df["crack"] = df["price_p"] - df["price_c"]
+                    vals = df["crack"].values.flatten()
+                    avg  = float(df["crack"].mean())
+                    col  = C["green"] if float(vals[-1]) > avg else C["red"]
+                    fig.add_trace(go.Scatter(x=df.index, y=vals, mode="lines",
+                        line=dict(color=col, width=1.8), fill="tozeroy",
+                        fillcolor=col+"18",
+                        hovertemplate=f"{name}: %{{y:.2f}} $/bbl<extra></extra>"))
+                    fig.add_hline(y=avg, line_dash="dash", line_color=C["amber"],
+                                  opacity=0.5, annotation_text=f"1yr avg ${avg:.1f}",
+                                  annotation_font_color=C["amber"], annotation_font_size=9)
+                fig.update_layout(
+                    title=dict(text=name, font=dict(size=12, color=C["text"]), x=0),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=8, r=8, t=32, b=8),
+                    xaxis=dict(showgrid=False, color=C["muted"], tickfont=dict(size=9)),
+                    yaxis=dict(showgrid=True, gridcolor=C["border"], color=C["muted"],
+                               tickfont=dict(size=9), tickprefix="$"),
+                    height=220,
+                )
+            except Exception:
+                fig = go.Figure()
+            return fig
+
+        return html.Div([
+            section_header("Crack Spreads", "Refinery margins — product vs crude, 1 year history"),
+            dbc.Row([
+                dbc.Col(dcc.Graph(figure=crack_chart("RB=F", "Gasoline Crack vs WTI $/bbl"),       config={"displayModeBar": False}), md=6),
+                dbc.Col(dcc.Graph(figure=crack_chart("HO=F", "Diesel/Heat Crack vs WTI $/bbl"),    config={"displayModeBar": False}), md=6),
+                dbc.Col(dcc.Graph(figure=crack_chart("RB=F", "Gasoline Crack vs Brent $/bbl", "BZ=F"), config={"displayModeBar": False}), md=6),
+                dbc.Col(dcc.Graph(figure=crack_chart("HO=F", "Diesel Crack vs Brent $/bbl",  "BZ=F"), config={"displayModeBar": False}), md=6),
+            ]),
+        ])
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
