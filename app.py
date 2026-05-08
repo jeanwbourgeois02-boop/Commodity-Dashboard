@@ -225,23 +225,101 @@ def td_history(sym: str, days: int = 365) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def fetch_all_prices() -> dict:
-    """Fetch all prices — oil via OilPriceAPI, equities via Twelve Data."""
+# In-memory cache for prices
+_price_cache = {}
+_cache_time  = {}
+CACHE_TTL    = 240  # 4 minutes
+
+def _cached(key, fetch_fn):
+    """Return cached value or fetch fresh."""
+    import time
+    now = time.time()
+    if key in _price_cache and now - _cache_time.get(key, 0) < CACHE_TTL:
+        return _price_cache[key]
+    val = fetch_fn()
+    _price_cache[key]  = val
+    _cache_time[key]   = now
+    return val
+
+
+def fetch_prices_for_tab(tab: str) -> dict:
+    """Fetch only the prices needed for the current tab."""
     result = {}
 
-    # Commodity prices via OilPriceAPI
-    for name, code in OIL_COMMODITIES.items():
-        p = oil_past_day(code)
+    # Define which instruments each tab needs
+    tab_oil = {
+        "crude":    ["Brent Crude","WTI Crude","Dubai Crude","Urals Crude","WTI Midland","OPEC Basket"],
+        "products": ["Gasoline (RBOB)","ULSD Diesel","Jet Fuel","Heating Oil","VLSFO","HSFO 380","MGO"],
+        "gas":      ["Henry Hub Gas","Dutch TTF Gas","JKM LNG"],
+        "freight":  [],
+        "macro":    ["Brent Crude","WTI Crude"],
+        "position": [],
+        "news":     [],
+    }
+    tab_td = {
+        "crude":    [],
+        "products": [],
+        "gas":      ["Flex LNG","Golar LNG"],
+        "freight":  ["Euronav (VLCC)","DHT Holdings","Frontline","Flex LNG","Golar LNG","BDRY Dry Bulk"],
+        "macro":    ["S&P 500","XLE Energy ETF","XOP Oil & Gas","ExxonMobil","Valero",
+                     "Gold","Copper","Silver","DXY","US 10Y Yield","VIX","EUR/USD","USD/CNY"],
+        "position": [],
+        "news":     [],
+    }
+
+    oil_names = tab_oil.get(tab, [])
+    td_names  = tab_td.get(tab, [])
+
+    # Fetch oil prices
+    for name in oil_names:
+        code = OIL_COMMODITIES.get(name)
+        if not code:
+            continue
+        def _fetch(c=code, n=name):
+            return oil_past_day(c)
+        p = _cached(f"oil_{name}", _fetch)
         if p:
             result[name] = {**p, "source": "oil"}
 
-    # Equity/macro prices via Twelve Data
-    for name, sym in TD_INSTRUMENTS.items():
-        p = td_quote(sym)
-        if p:
-            result[name] = {**p, "source": "td", "sym": sym}
+    # Fetch TD prices in batch
+    if td_names:
+        syms = [TD_INSTRUMENTS[n] for n in td_names if n in TD_INSTRUMENTS]
+        sym_str = ",".join(syms)
+        def _fetch_td(ss=sym_str, ns=td_names):
+            batch = {}
+            try:
+                r = requests.get(f"{TD_BASE}/batch_price_quote",
+                                 params={"symbol": ss, "apikey": TD_KEY}, timeout=15)
+                d = r.json()
+                quotes = d if isinstance(d, dict) else {i.get("symbol",""): i for i in d} if isinstance(d, list) else {}
+                for name in ns:
+                    sym = TD_INSTRUMENTS.get(name)
+                    if not sym:
+                        continue
+                    q = quotes.get(sym, {})
+                    if not q or "code" in q:
+                        continue
+                    try:
+                        price = float(q.get("close") or q.get("price") or 0)
+                        prev  = float(q.get("previous_close") or price)
+                        chg   = price - prev
+                        pct   = (chg / prev * 100) if prev else 0
+                        batch[name] = {"price": price, "chg": chg, "pct": pct,
+                                       "source": "td", "sym": sym}
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return batch
+        td_result = _cached(f"td_batch_{tab}", _fetch_td)
+        result.update(td_result)
 
     return result
+
+
+def fetch_all_prices() -> dict:
+    """Kept for compatibility — returns empty dict, tabs fetch their own data."""
+    return {}
 
 
 def fetch_history_for(name: str, days: int = 365) -> pd.DataFrame:
@@ -554,7 +632,8 @@ def refresh(_, __):
     Input("store", "data"),
 )
 def render(tab, prices):
-    prices = prices or {}
+    # Each tab fetches its own prices lazily
+    prices = fetch_prices_for_tab(tab)
 
     # ── CRUDE OIL ─────────────────────────────────────────────────────────────
     if tab == "crude":
