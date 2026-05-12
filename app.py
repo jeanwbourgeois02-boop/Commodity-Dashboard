@@ -6,7 +6,7 @@ Architecture: background thread pre-fetches all data, serves from memory cache
 """
 
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import pandas as pd
@@ -56,8 +56,10 @@ TD_BASE   = "https://api.twelvedata.com"
 EIA_KEY   = "GJf5HWhOHneOmzBuq0pwz1xWbSLwdgy63McZGJqY"
 EIA_BASE  = "https://api.eia.gov/v2"
 
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "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")
+AI_PASSWORD   = "vitol2026"   # change this to whatever you want
+
 # ── Instrument definitions ────────────────────────────────────────────────────
-# OilPriceAPI codes
 OIL_CODES = {
     "Brent Crude":     "BRENT_CRUDE_USD",
     "WTI Crude":       "WTI_USD",
@@ -77,7 +79,6 @@ OIL_CODES = {
     "MGO":             "MGO_05S_USD",
 }
 
-# Omkar API names (fallback for oil prices + metals/ags)
 OMKAR_NAMES = {
     "WTI Crude":       "crude_oil",
     "Brent Crude":     "brent_crude_oil",
@@ -92,7 +93,6 @@ OMKAR_NAMES = {
     "Soybeans":        "soybean",
 }
 
-# Twelve Data symbols
 TD_SYMS = {
     "S&P 500":         "SPX",
     "XLE Energy ETF":  "XLE",
@@ -126,17 +126,21 @@ NEWS_FEEDS = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MEMORY CACHE — all data lives here, served instantly to UI
+# MEMORY CACHE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _cache = {
-    "prices":    {},      # {name: {price, chg, pct}}
-    "history":   {},      # {name: DataFrame}
-    "eia":       {},      # {series_id: DataFrame}
-    "cot":       pd.DataFrame(),
-    "news":      [],
-    "last_full": None,    # datetime of last full refresh
-    "status":    "Initialising...",
+    "prices":       {},
+    "history":      {},
+    "eia":          {},
+    "cot":          pd.DataFrame(),
+    "news":         [],
+    "last_full":    None,
+    "status":       "Initialising...",
+    "ai_market":    None,
+    "ai_arb":       None,
+    "ai_trades":    None,
+    "ai_generated": None,
 }
 _cache_lock = threading.Lock()
 
@@ -170,7 +174,6 @@ def _omkar_price(name: str) -> float | None:
 
 
 def _td_batch(syms: list[str]) -> dict:
-    """Fetch multiple TD quotes in one call."""
     try:
         r = requests.get(f"{TD_BASE}/batch_price_quote",
                          params={"symbol": ",".join(syms), "apikey": TD_KEY},
@@ -190,10 +193,10 @@ def _oil_history(code: str, days: int = 365) -> pd.DataFrame:
         end   = datetime.utcnow()
         start = end - timedelta(days=days)
         r = requests.get(f"{OIL_BASE}/prices", headers=OIL_HDR, params={
-            "by_code":  code,
+            "by_code":   code,
             "by_period": "daily",
-            "start_at": start.strftime("%Y-%m-%dT00:00:00Z"),
-            "end_at":   end.strftime("%Y-%m-%dT23:59:59Z"),
+            "start_at":  start.strftime("%Y-%m-%dT00:00:00Z"),
+            "end_at":    end.strftime("%Y-%m-%dT23:59:59Z"),
         }, timeout=20)
         d   = r.json()
         pts = d.get("data", [])
@@ -237,13 +240,13 @@ def _fetch_eia(series_id: str, length: int = 104) -> pd.DataFrame:
         r = requests.get(
             f"{EIA_BASE}/petroleum/stoc/wstk/data/",
             params={
-                "api_key":         EIA_KEY,
-                "frequency":       "weekly",
-                "data[0]":         "value",
-                f"facets[series][]": series_id,
-                "sort[0][column]": "period",
-                "sort[0][direction]": "desc",
-                "length":          length,
+                "api_key":              EIA_KEY,
+                "frequency":            "weekly",
+                "data[0]":              "value",
+                "facets[series][]":     series_id,
+                "sort[0][column]":      "period",
+                "sort[0][direction]":   "desc",
+                "length":               length,
             }, timeout=10)
         d    = r.json()
         rows = d.get("response", {}).get("data", [])
@@ -297,27 +300,194 @@ def _fetch_news() -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# AI FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_market_context(prices: dict, eia: dict, cot_df) -> str:
+    lines = ["=== LIVE MARKET DATA ===\n"]
+    lines.append("CRUDE OIL PRICES:")
+    for name in ["Brent Crude","WTI Crude","Dubai Crude","Urals Crude","WTI Midland"]:
+        p = prices.get(name, {})
+        if p:
+            lines.append(f"  {name}: ${p['price']:.2f}/bbl ({p.get('pct',0):+.2f}%)")
+
+    brent = prices.get("Brent Crude",{}).get("price",0)
+    wti   = prices.get("WTI Crude",  {}).get("price",0)
+    dubai = prices.get("Dubai Crude",{}).get("price",0)
+    urals = prices.get("Urals Crude",{}).get("price",0)
+    lines.append("\nKEY SPREADS:")
+    if brent and wti:   lines.append(f"  Brent-WTI: ${brent-wti:.2f}/bbl")
+    if brent and dubai: lines.append(f"  Brent-Dubai: ${brent-dubai:.2f}/bbl")
+    if brent and urals: lines.append(f"  Urals discount to Brent: ${urals-brent:.2f}/bbl")
+
+    lines.append("\nPRODUCTS & CRACK SPREADS:")
+    gas  = prices.get("Gasoline RBOB",{}).get("price",0)
+    ulsd = prices.get("ULSD Diesel",  {}).get("price",0)
+    jet  = prices.get("Jet Fuel",     {}).get("price",0)
+    vlsfo = prices.get("VLSFO",   {}).get("price",0)
+    hsfo  = prices.get("HSFO 380",{}).get("price",0)
+    if gas  and brent: lines.append(f"  Gasoline crack (vs Brent): ${gas*42-brent:.2f}/bbl")
+    if ulsd and brent: lines.append(f"  Diesel crack (vs Brent): ${ulsd*42-brent:.2f}/bbl")
+    if jet  and brent: lines.append(f"  Jet crack (vs Brent): ${jet*42-brent:.2f}/bbl")
+    if vlsfo and hsfo: lines.append(f"  Hi-5 spread (VLSFO-HSFO): ${vlsfo-hsfo:.2f}/t")
+
+    lines.append("\nNATURAL GAS & LNG:")
+    henry = prices.get("Henry Hub Gas",{}).get("price",0)
+    ttf   = prices.get("Dutch TTF Gas",{}).get("price",0)
+    jkm   = prices.get("JKM LNG",      {}).get("price",0)
+    if henry: lines.append(f"  Henry Hub: ${henry:.2f}/MMBtu")
+    if ttf:   lines.append(f"  Dutch TTF: ${ttf:.2f}/MMBtu")
+    if jkm:   lines.append(f"  JKM LNG: ${jkm:.2f}/MMBtu")
+    if ttf and henry: lines.append(f"  TTF-Henry Hub spread: ${ttf-henry:.2f}/MMBtu")
+
+    lines.append("\nMACRO:")
+    for name in ["DXY","Gold","Copper","VIX","US 10Y Yield","XLE Energy ETF"]:
+        p = prices.get(name,{})
+        if p: lines.append(f"  {name}: {p['price']:.2f} ({p.get('pct',0):+.2f}%)")
+
+    lines.append("\nEIA INVENTORIES (vs 2yr avg):")
+    for key, label in [("crude","US Crude"),("cushing","Cushing OK"),
+                        ("gasoline","US Gasoline"),("distillate","US Distillate")]:
+        df = eia.get(key)
+        if df is not None and not df.empty:
+            latest = float(df["value"].iloc[-1])
+            avg    = float(df["value"].mean())
+            diff   = latest - avg
+            lines.append(f"  {label}: {latest:,.0f}k bbls ({'+' if diff>=0 else ''}{diff:,.0f}k vs avg)")
+
+    if not cot_df.empty and "net" in cot_df.columns:
+        net     = cot_df["net"]
+        latest  = int(net.iloc[-1])
+        net_pct = int((net.iloc[-1]-net.min())/(net.max()-net.min())*100) if net.max()!=net.min() else 50
+        lines.append(f"\nCOT POSITIONING:")
+        lines.append(f"  WTI managed money net: {latest:+,} contracts ({net_pct}th percentile vs 1yr)")
+
+    return "\n".join(lines)
+
+
+def _call_claude(prompt: str) -> str:
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key":         ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type":      "application/json",
+            },
+            json={
+                "model":      "claude-sonnet-4-20250514",
+                "max_tokens": 1500,
+                "messages":   [{"role": "user", "content": prompt}],
+            },
+            timeout=45,
+        )
+        d = r.json()
+        if "content" in d:
+            return d["content"][0]["text"]
+        elif "error" in d:
+            return f"API error: {d['error'].get('message','Unknown error')}"
+        return "No response received."
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+def _run_daily_ai():
+    """Generate all three AI reports and store in cache. ~$0.03-0.05 per run."""
+    with _cache_lock:
+        _cache["status"] = "Generating AI report..."
+
+    with _cache_lock:
+        prices_snap = dict(_cache["prices"])
+        eia_snap    = dict(_cache["eia"])
+        cot_snap    = _cache["cot"].copy() if not _cache["cot"].empty else pd.DataFrame()
+
+    ctx = _build_market_context(prices_snap, eia_snap, cot_snap)
+
+    market_text = _call_claude(f"""You are a senior crude oil and commodity market analyst at a major trading house.
+
+{ctx}
+
+Generate a structured market read:
+
+# Market Overview
+One paragraph on the overall market state and dominant narrative.
+
+## Consensus View
+What is the market currently pricing and why?
+
+## Supporting Signals
+3-4 data points most strongly supporting the current price level.
+
+## Contradicting Signals
+3-4 factors the market may be ignoring.
+
+## Where The Market Could Be Wrong
+Your most important insight: what is the most likely mispricing?
+
+## Key Data To Watch
+The 3 most important upcoming releases that could change the picture.
+
+Be direct, specific, professional. Use the actual numbers provided.""")
+
+    arb_text = _call_claude(f"""You are a physical and financial commodity trader at a major trading house.
+
+{ctx}
+
+Identify specific arbitrage and relative value opportunities:
+
+# Physical Arbitrage
+Location, quality, or timing arbs in crude and products. For each: what is the arb, why attractive, execution risks.
+
+# Financial Relative Value
+Mispriced spreads, calendar arbs, cross-commodity plays. For each: the trade, why attractive vs history, what closes it.
+
+# Freight-Adjusted Flows
+Which crude trade routes look economically attractive right now? Which look uneconomic?
+
+# LNG/Gas Arb
+Is the TTF-JKM-Henry Hub triangle mispriced? Flag conviction (High/Medium/Low) for each idea.""")
+
+    trade_text = _call_claude(f"""You are a commodity trading desk strategist.
+
+{ctx}
+
+Generate 3 specific trade ideas. For each:
+
+## Trade [N]: [Name]
+**Direction:** Long/Short/Spread
+**Instrument:** Specific contract or structure
+**Entry:** Approximate level
+**Target:** Price target and timeframe
+**Stop:** Where you are wrong
+**Thesis:** Why this makes sense RIGHT NOW
+**Key risks:** What kills this trade
+**Conviction:** X/10
+
+Span different time horizons. Add a brief disclaimer at the end.""")
+
+    with _cache_lock:
+        _cache["ai_market"]    = market_text
+        _cache["ai_arb"]       = arb_text
+        _cache["ai_trades"]    = trade_text
+        _cache["ai_generated"] = datetime.utcnow()
+        _cache["status"]       = "Live"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # BACKGROUND REFRESH THREAD
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _refresh_prices():
-    """Fetch all current prices."""
     prices = {}
-
-    # Oil prices via OilPriceAPI
     for name, code in OIL_CODES.items():
         p = _oil_price(code)
         if p:
             prices[name] = {"price": p, "chg": 0.0, "pct": 0.0}
-
-    # Fill missing oil prices via Omkar
     for name, omk in OMKAR_NAMES.items():
         if name not in prices:
             p = _omkar_price(omk)
             if p:
                 prices[name] = {"price": p, "chg": 0.0, "pct": 0.0}
-
-    # Equities + macro via Twelve Data batch
     td_syms = list(TD_SYMS.values())
     quotes  = _td_batch(td_syms)
     for name, sym in TD_SYMS.items():
@@ -332,15 +502,11 @@ def _refresh_prices():
             prices[name] = {"price": price, "chg": chg, "pct": pct}
         except Exception:
             continue
-
     return prices
 
 
 def _refresh_history():
-    """Fetch price history for key instruments."""
     history = {}
-
-    # Key oil histories via OilPriceAPI
     oil_hist = {
         "Brent Crude":   "BRENT_CRUDE_USD",
         "WTI Crude":     "WTI_USD",
@@ -359,8 +525,6 @@ def _refresh_history():
         df = _oil_history(code, 365)
         if not df.empty:
             history[name] = df
-
-    # Equity histories via Twelve Data
     td_hist = {
         "XLE Energy ETF": "XLE",
         "DXY":            "DXY",
@@ -378,12 +542,10 @@ def _refresh_history():
         df = _td_history(sym, 365)
         if not df.empty:
             history[name] = df
-
     return history
 
 
 def _refresh_eia():
-    """Fetch all EIA series."""
     series = {
         "crude":      "WCRSTUS1",
         "cushing":    "WCSSTUS1",
@@ -400,17 +562,13 @@ def _refresh_eia():
 
 
 def full_refresh():
-    """Full data refresh — runs in background thread."""
-    global _cache
     with _cache_lock:
-        _cache["status"] = "Refreshing prices..."
-
+        _cache["status"] = "Refreshing..."
     prices  = _refresh_prices()
     history = _refresh_history()
     eia     = _refresh_eia()
     cot     = _fetch_cot()
     news    = _fetch_news()
-
     with _cache_lock:
         _cache["prices"]    = prices
         _cache["history"]   = history
@@ -422,29 +580,39 @@ def full_refresh():
 
 
 def prices_only_refresh():
-    """Quick price-only refresh — runs every 5 minutes."""
     prices = _refresh_prices()
     with _cache_lock:
-        _cache["prices"] = prices
+        _cache["prices"]    = prices
         _cache["last_full"] = datetime.utcnow()
-        _cache["status"] = "Live"
+        _cache["status"]    = "Live"
 
 
 def background_loop():
-    """Background thread: full refresh on start, then prices every 5 min,
-    full refresh every hour."""
+    """Full refresh on start. Prices every 5 min. Full refresh every hour.
+    AI report generated once daily at 07:00 UTC."""
     full_refresh()
-    last_full = time.time()
+    last_full    = time.time()
+    last_ai_date = None
+
+    # First AI report 30s after startup (data needs to settle first)
+    time.sleep(30)
+    if ANTHROPIC_KEY:
+        threading.Thread(target=_run_daily_ai, daemon=True).start()
+        last_ai_date = datetime.utcnow().date()
+
     while True:
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)
         if time.time() - last_full > 3600:
             full_refresh()
             last_full = time.time()
         else:
             prices_only_refresh()
+        now = datetime.utcnow()
+        if ANTHROPIC_KEY and now.hour == 7 and now.date() != last_ai_date:
+            threading.Thread(target=_run_daily_ai, daemon=True).start()
+            last_ai_date = now.date()
 
 
-# Start background thread immediately
 _bg_thread = threading.Thread(target=background_loop, daemon=True)
 _bg_thread.start()
 
@@ -510,7 +678,6 @@ def spread_box(label: str, val, unit: str = "", note: str = "",
     if val is None or val == 0:
         col  = C["muted"]
         disp = "—"
-        sign = ""
     else:
         col  = C["green"] if (val > 0) == bullish_if_positive else C["red"]
         sign = "+" if val > 0 else ""
@@ -541,7 +708,6 @@ def hist_chart(name: str, title: str, color: str, days: int = 365,
             fill="tozeroy", fillcolor=color + "0f",
             hovertemplate="%{y:.2f}<extra></extra>",
         ))
-        # Add 200-day MA if enough data
         if len(df2) >= 50:
             ma = df2["price"].rolling(50).mean()
             fig.add_trace(go.Scatter(
@@ -626,7 +792,7 @@ def eia_fig(key: str, title: str) -> go.Figure:
             hovertemplate="%{x|%b %d}: %{y:,.0f}<extra></extra>",
         ))
         fig.add_hline(y=avg, line_dash="dash", line_color=C["amber"],
-                      opacity=0.5, annotation_text=f"2yr avg",
+                      opacity=0.5, annotation_text="2yr avg",
                       annotation_font_color=C["amber"], annotation_font_size=8)
         diff = lat - avg
         fig.add_annotation(
@@ -675,6 +841,52 @@ def news_card(a: dict) -> html.Div:
               "borderRadius": "6px", "padding": "10px 12px", "marginBottom": "8px"})
 
 
+def _format_ai(text: str) -> html.Div:
+    """Render AI response text as styled HTML."""
+    lines   = text.strip().split("\n")
+    content = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            content.append(html.Br())
+        elif line.startswith("## "):
+            content.append(html.Div(line[3:], style={
+                "fontSize":"12px","fontWeight":"700","color":C["accent"],
+                "marginTop":"14px","marginBottom":"5px",
+                "textTransform":"uppercase","letterSpacing":"0.5px"}))
+        elif line.startswith("# "):
+            content.append(html.Div(line[2:], style={
+                "fontSize":"14px","fontWeight":"800","color":C["text"],
+                "marginTop":"16px","marginBottom":"8px"}))
+        elif line.startswith("**") and line.endswith("**"):
+            content.append(html.Div(line.strip("*"), style={
+                "fontSize":"12px","fontWeight":"700","color":C["teal"],
+                "marginTop":"8px","marginBottom":"3px"}))
+        elif line.startswith("- ") or line.startswith("* "):
+            content.append(html.Div([
+                html.Span("→ ", style={"color":C["accent"]}), line[2:],
+            ], style={"fontSize":"12px","color":C["text"],"lineHeight":"1.6",
+                      "marginBottom":"3px","paddingLeft":"8px"}))
+        else:
+            content.append(html.Div(line, style={
+                "fontSize":"12px","color":C["text"],
+                "lineHeight":"1.65","marginBottom":"3px"}))
+    return html.Div(content)
+
+
+def _report_block(title: str, text, color: str) -> html.Div:
+    body = _format_ai(text) if text else html.Div(
+        "Generating...", style={"fontSize":"12px","color":C["muted"]})
+    return html.Div([
+        html.Div(title, style={"fontSize":"11px","fontWeight":"700","color":color,
+                                "textTransform":"uppercase","letterSpacing":"0.5px",
+                                "marginBottom":"10px"}),
+        body,
+    ], style={"background":C["card"],"border":f"1px solid {color}22",
+              "borderLeft":f"3px solid {color}","borderRadius":"6px",
+              "padding":"14px","marginBottom":"12px"})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYOUT
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -688,7 +900,6 @@ app.layout = html.Div(
     style={"background": C["bg"], "minHeight": "100vh",
            "fontFamily": "'Inter','Segoe UI',sans-serif"},
     children=[
-        # Header
         html.Div([
             dbc.Row([
                 dbc.Col([
@@ -709,7 +920,6 @@ app.layout = html.Div(
         ], style={"background": C["surface"], "borderBottom": f"1px solid {C['border']}",
                   "padding": "0 20px", "position": "sticky", "top": "0", "zIndex": "100"}),
 
-        # Tabs
         dcc.Tabs(id="tabs", value="crude",
                  style={"background": C["surface"],
                         "borderBottom": f"1px solid {C['border']}"},
@@ -721,11 +931,10 @@ app.layout = html.Div(
             dcc.Tab(label="Macro & Metals",  value="macro",    style=TS, selected_style=TS_SEL),
             dcc.Tab(label="Positioning",     value="position", style=TS, selected_style=TS_SEL),
             dcc.Tab(label="News",            value="news",     style=TS, selected_style=TS_SEL),
+            dcc.Tab(label="AI Intelligence", value="ai",       style=TS, selected_style=TS_SEL),
         ]),
 
         html.Div(id="content", style={"padding": "18px 20px"}),
-
-        # Poll every 60 seconds to update status bar and prices
         dcc.Interval(id="poll", interval=60_000, n_intervals=0),
         dcc.Store(id="tick"),
     ]
@@ -743,45 +952,42 @@ app.layout = html.Div(
     Input("refresh-btn", "n_clicks"),
 )
 def tick(_, clicks):
-    """Trigger manual refresh if button clicked, update status bar."""
     if clicks:
         threading.Thread(target=prices_only_refresh, daemon=True).start()
     with _cache_lock:
-        st  = _cache["status"]
-        ts  = _cache["last_full"]
+        st = _cache["status"]
+        ts = _cache["last_full"]
     ts_str = ts.strftime("%H:%M UTC") if ts else "initialising..."
     return str(datetime.utcnow()), f"{st}  |  {ts_str}"
 
 
 @app.callback(
     Output("content", "children"),
-    Input("tabs", "value"),
-    Input("tick", "data"),
+    Input("tabs",  "value"),
+    Input("tick",  "data"),
 )
 def render(tab, _):
     with _cache_lock:
-        prices  = dict(_cache["prices"])
-        history = dict(_cache["history"])
-        eia     = dict(_cache["eia"])
-        cot_df  = _cache["cot"].copy() if not _cache["cot"].empty else pd.DataFrame()
-        news    = list(_cache["news"])
+        prices = dict(_cache["prices"])
+        eia    = dict(_cache["eia"])
+        cot_df = _cache["cot"].copy() if not _cache["cot"].empty else pd.DataFrame()
+        news   = list(_cache["news"])
 
     # ── CRUDE OIL ─────────────────────────────────────────────────────────────
     if tab == "crude":
         crude_names = ["Brent Crude", "WTI Crude", "Dubai Crude",
                        "Urals Crude", "WTI Midland", "OPEC Basket"]
-
         brent = prices.get("Brent Crude",  {}).get("price", 0)
         wti   = prices.get("WTI Crude",    {}).get("price", 0)
         dubai = prices.get("Dubai Crude",  {}).get("price", 0)
         urals = prices.get("Urals Crude",  {}).get("price", 0)
 
         spread_row = dbc.Row([
-            spread_box("Brent – WTI", round(brent - wti, 2) if brent and wti else None,
+            spread_box("Brent – WTI", round(brent-wti,2) if brent and wti else None,
                        "$/bbl", "Atlantic arb / US export driver"),
-            spread_box("Brent – Dubai", round(brent - dubai, 2) if brent and dubai else None,
+            spread_box("Brent – Dubai", round(brent-dubai,2) if brent and dubai else None,
                        "$/bbl", "East/west routing signal (EFS proxy)"),
-            spread_box("Urals discount", round(urals - brent, 2) if brent and urals else None,
+            spread_box("Urals discount", round(urals-brent,2) if brent and urals else None,
                        "$/bbl", "Russian sanctions discount", bullish_if_positive=False),
             dbc.Col(html.Div([
                 html.Div("OPEC+ spare capacity", style={"fontSize":"10px","color":C["muted"],
@@ -862,28 +1068,21 @@ def render(tab, _):
     elif tab == "products":
         prod_names = ["Gasoline RBOB", "ULSD Diesel", "Jet Fuel",
                       "Heating Oil", "VLSFO", "HSFO 380", "MGO"]
-
         brent = prices.get("Brent Crude", {}).get("price", 0)
-        wti   = prices.get("WTI Crude",   {}).get("price", 0)
         gas   = prices.get("Gasoline RBOB",{}).get("price", 0)
         ulsd  = prices.get("ULSD Diesel", {}).get("price", 0)
         jet   = prices.get("Jet Fuel",    {}).get("price", 0)
         vlsfo = prices.get("VLSFO",       {}).get("price", 0)
         hsfo  = prices.get("HSFO 380",    {}).get("price", 0)
 
-        # Crack spreads (products in $/bbl vs Brent)
         spread_row = dbc.Row([
-            spread_box("Gasoline crack",
-                       round(gas * 42 - brent, 2) if gas and brent else None,
+            spread_box("Gasoline crack", round(gas*42-brent,2) if gas and brent else None,
                        "$/bbl", "RBOB vs Brent"),
-            spread_box("Diesel crack",
-                       round(ulsd * 42 - brent, 2) if ulsd and brent else None,
+            spread_box("Diesel crack",   round(ulsd*42-brent,2) if ulsd and brent else None,
                        "$/bbl", "ULSD vs Brent"),
-            spread_box("Jet crack",
-                       round(jet * 42 - brent, 2) if jet and brent else None,
+            spread_box("Jet crack",      round(jet*42-brent,2) if jet and brent else None,
                        "$/bbl", "Jet fuel vs Brent"),
-            spread_box("Hi-5 spread",
-                       round(vlsfo - hsfo, 2) if vlsfo and hsfo else None,
+            spread_box("Hi-5 spread",    round(vlsfo-hsfo,2) if vlsfo and hsfo else None,
                        "$/t", "VLSFO vs HSFO 380 — IMO 2020 signal"),
         ], style={"marginBottom":"16px"})
 
@@ -914,12 +1113,11 @@ def render(tab, _):
                 ibox("Reading Crack Spreads",
                      "Crack spread = product price minus crude. Measures refinery profitability. "
                      "High cracks → refiners run harder → more crude demand → supportive for flat price. "
-                     "3-2-1 crack = (2 × gasoline + 1 × diesel − 3 × crude) / 3. "
-                     "Percentile vs 1yr range tells you if margins are historically wide or tight.", C["accent"]),
+                     "3-2-1 crack = (2 × gasoline + 1 × diesel − 3 × crude) / 3.", C["accent"]),
                 ibox("Gasoline Seasonality",
                      "US driving season Memorial Day to Labor Day (May–Sept). "
                      "Gasoline crack typically peaks spring/summer. RVP spec switchover "
-                     "in April/May tightens supply temporarily — watch Colonial Pipeline batching.", C["green"]),
+                     "in April/May tightens supply temporarily.", C["green"]),
             ], md=6),
             dbc.Col([
                 ibox("Diesel — The Industrial Fuel",
@@ -934,8 +1132,7 @@ def render(tab, _):
         ])
 
         return html.Div([
-            sec("Refined Products & Marine Fuels",
-                "Gasoline, diesel, jet fuel, heating oil, VLSFO, HSFO, MGO"),
+            sec("Refined Products & Marine Fuels", "Gasoline, diesel, jet fuel, heating oil, VLSFO, HSFO, MGO"),
             price_strip(prod_names, prices),
             sec("Live Crack Spreads", "Calculated from current prices"),
             spread_row,
@@ -949,9 +1146,7 @@ def render(tab, _):
 
     # ── GAS & LNG ─────────────────────────────────────────────────────────────
     elif tab == "gas":
-        gas_names = ["Henry Hub Gas", "Dutch TTF Gas", "JKM LNG",
-                     "Flex LNG", "Golar LNG"]
-
+        gas_names = ["Henry Hub Gas", "Dutch TTF Gas", "JKM LNG", "Flex LNG", "Golar LNG"]
         henry = prices.get("Henry Hub Gas",{}).get("price", 0)
         ttf   = prices.get("Dutch TTF Gas",{}).get("price", 0)
         jkm   = prices.get("JKM LNG",      {}).get("price", 0)
@@ -961,7 +1156,7 @@ def render(tab, _):
             spread_box("Dutch TTF", ttf,   "$/MMBtu", "European benchmark"),
             spread_box("JKM LNG",   jkm,   "$/MMBtu", "Asian LNG spot"),
             spread_box("TTF – Henry Hub",
-                       round(ttf - henry, 2) if ttf and henry else None,
+                       round(ttf-henry,2) if ttf and henry else None,
                        "$/MMBtu", "Transatlantic LNG arb signal"),
         ], style={"marginBottom":"16px"})
 
@@ -982,25 +1177,21 @@ def render(tab, _):
                 ibox("The LNG Routing Decision",
                      "US LNG goes east if JKM > Henry Hub + ~$3 liquefaction + freight. "
                      "Goes to Europe if TTF > JKM + freight. "
-                     "This spread is calculated in real time by Vitol, Shell, Total on every cargo. "
-                     "When TTF-JKM collapses, Atlantic cargoes divert to Asia.", C["teal"]),
+                     "This spread is calculated in real time by Vitol, Shell, Total on every cargo.", C["teal"]),
                 ibox("European Gas Storage",
                      "GIE AGSI data — % full vs seasonal norms. EU winter target ~90% full. "
                      "Summer injection season April–October. Storage deficit = TTF bullish. "
-                     "Russia pipeline gas now minimal (NordStream offline). "
-                     "Europe structurally dependent on Norwegian pipeline + LNG imports.", C["amber"]),
+                     "Russia pipeline gas now minimal (NordStream offline).", C["amber"]),
             ], md=6),
             dbc.Col([
                 ibox("JKM Volatility",
                      "Asian LNG spot is the most volatile benchmark — can spike $3-5 in days. "
-                     "Cold snap in NE Asia (Japan/Korea/China) triggers emergency buying. "
-                     "Nuclear outages in Japan also drive spot demand. "
-                     "Summer AC demand in China increasingly market-moving.", C["purple"]),
+                     "Cold snap in NE Asia triggers emergency buying. "
+                     "Nuclear outages in Japan also drive spot demand.", C["purple"]),
                 ibox("US LNG Export Capacity",
                      "US now world's largest LNG exporter (~14 bcf/d). "
                      "Key terminals: Sabine Pass, Freeport, Corpus Christi, Cameron, Calcasieu. "
-                     "Any outage removes supply and immediately spikes TTF and JKM. "
-                     "New capacity (Plaquemines, Port Arthur) coming online 2025-2027.", C["green"]),
+                     "Any outage removes supply and immediately spikes TTF and JKM.", C["green"]),
             ], md=6),
         ])
 
@@ -1017,8 +1208,8 @@ def render(tab, _):
 
     # ── FREIGHT ───────────────────────────────────────────────────────────────
     elif tab == "freight":
-        freight_names = ["Euronav VLCC", "DHT Holdings", "Frontline",
-                         "Flex LNG", "Golar LNG", "BDRY Dry Bulk"]
+        freight_names = ["Euronav VLCC","DHT Holdings","Frontline",
+                         "Flex LNG","Golar LNG","BDRY Dry Bulk"]
 
         charts = dbc.Row([
             dbc.Col(dcc.Graph(figure=hist_chart("Euronav VLCC","Euronav — VLCC proxy",C["accent"]),
@@ -1039,31 +1230,21 @@ def render(tab, _):
             ("TD3C — VLCC (ME Gulf to China)", C["accent"],
              "Benchmark crude tanker route, 2mb cargo, ~35 days voyage. "
              "Rates driven by OPEC+ export volumes and Chinese crude import demand. "
-             "High Worldscale = tight tonnage = physical crude demand is strong. "
-             "Euronav, DHT and Frontline are the best listed proxies."),
+             "High Worldscale = tight tonnage = physical crude demand is strong."),
             ("TD20 — Suezmax (W.Africa to Europe)", C["teal"],
              "West Africa to NWE continent. Key route for Nigerian Bonny Light and Angolan Girassol "
-             "into European refineries. Rates rise when Atlantic basin crude flows strongly westward. "
-             "Also tracks US crude export flows to Europe via Aframax/Suezmax."),
+             "into European refineries. Rates rise when Atlantic basin crude flows strongly westward."),
             ("LNG Carriers", C["purple"],
              "Spot day rates range $40-180k/day depending on season. "
-             "Spike sharply in winter when NE Asia drives spot demand. Low in summer shoulder season. "
-             "Flex LNG and Golar LNG are listed proxies. "
-             "TTF-JKM spread determines which direction cargoes flow."),
+             "Spike sharply in winter when NE Asia drives spot demand. Low in summer shoulder season."),
             ("Baltic Dry Index", C["amber"],
              "Dry bulk shipping: Capesize (iron ore, coal), Panamax (grain, coal), Supramax. "
-             "BDI is a real-time barometer of global industrial demand — "
-             "rising BDI signals Chinese steel production picking up. "
-             "BDRY ETF tracks the index."),
+             "BDI is a real-time barometer of global industrial demand."),
             ("TC2 — MR Tanker (ARA to USAC)", C["green"],
-             "Clean products tanker route, Amsterdam-Rotterdam-Antwerp to US Atlantic Coast. "
-             "Tight TC2 rates signal strong transatlantic gasoline arbitrage flowing. "
-             "Watches Colonial Pipeline batching schedule and ARA product stock levels."),
+             "Clean products tanker route. Tight TC2 rates signal strong transatlantic gasoline arb."),
             ("Shadow Fleet", C["red"],
-             "~600-700 vessels carrying Russian, Iranian and Venezuelan crude "
-             "outside Western tracking and insurance frameworks. "
-             "Absorbs global tanker capacity — when utilisation rises, mainstream freight tightens. "
-             "Track via Kpler or Vortexa AIS data (professional tools)."),
+             "~600-700 vessels carrying Russian, Iranian and Venezuelan crude outside Western frameworks. "
+             "Absorbs global tanker capacity — when utilisation rises, mainstream freight tightens."),
         ]
 
         return html.Div([
@@ -1106,23 +1287,19 @@ def render(tab, _):
                 ibox("DXY & Commodity Prices",
                      "Commodities priced in USD — strong dollar raises the cost for EM importers = demand destruction. "
                      "DXY and Brent have a strong negative correlation (typically -0.6 to -0.8). "
-                     "Fed rate decisions are therefore directly commodity-relevant. "
                      "Watch real yields (TIPS) — negative real yields historically very bullish for hard assets.", C["amber"]),
                 ibox("Copper as Global Demand Barometer",
                      "China consumes ~55% of global copper. Rising copper = China industrial activity picking up. "
                      "Copper-gold ratio rising = risk-on, growth expectations improving = bullish crude demand. "
-                     "China Total Social Financing (credit data) leads copper by 6-9 months — "
-                     "the best leading indicator for the complex.", C["teal"]),
+                     "China Total Social Financing leads copper by 6-9 months.", C["teal"]),
             ], md=6),
             dbc.Col([
                 ibox("Energy Equities vs Crude",
                      "XLE/XOP vs crude oil divergence signals market expectations. "
                      "Equities leading crude higher = forward-looking market expects crude to rise. "
-                     "Equities lagging = equity market sceptical of the commodity move — watch for catch-up. "
                      "HY energy credit spreads give you the market's implied breakeven oil price.", C["green"]),
                 ibox("VIX & Risk-Off Dynamics",
                      "High VIX = institutional deleveraging = all assets sold simultaneously. "
-                     "In risk-off episodes, crude/commodity and equity correlations converge to 1. "
                      "After VIX spike and reversion, commodity vol often stays elevated — "
                      "historically a good entry point to buy back-month options cheaply.", C["purple"]),
             ], md=6),
@@ -1154,19 +1331,15 @@ def render(tab, _):
             net_max    = float(net.max())
             net_min    = float(net.min())
             latest_net = int(net.iloc[-1])
-            net_pct    = int((net.iloc[-1] - net_min) / (net_max - net_min) * 100) if net_max != net_min else 50
+            net_pct    = int((net.iloc[-1]-net_min)/(net_max-net_min)*100) if net_max!=net_min else 50
 
             colors = [C["green"] if v >= 0 else C["red"] for v in net]
             fig_net.add_trace(go.Bar(x=dates, y=net, marker_color=colors,
                 hovertemplate="%{x|%b %d}: %{y:,.0f} contracts<extra></extra>"))
-            fig_net.add_hrect(y0=net_max*0.85, y1=net_max,
-                              fillcolor=C["red"], opacity=0.06,
-                              annotation_text="Crowded long",
-                              annotation_font_color=C["red"], annotation_font_size=9)
-            fig_net.add_hrect(y0=net_min, y1=net_min*0.85,
-                              fillcolor=C["green"], opacity=0.06,
-                              annotation_text="Crowded short",
-                              annotation_font_color=C["green"], annotation_font_size=9)
+            fig_net.add_hrect(y0=net_max*0.85, y1=net_max, fillcolor=C["red"], opacity=0.06,
+                annotation_text="Crowded long", annotation_font_color=C["red"], annotation_font_size=9)
+            fig_net.add_hrect(y0=net_min, y1=net_min*0.85, fillcolor=C["green"], opacity=0.06,
+                annotation_text="Crowded short", annotation_font_color=C["green"], annotation_font_size=9)
 
             fig_gross.add_trace(go.Scatter(x=dates, y=longs.values.flatten(),
                 mode="lines", name="Longs", line=dict(color=C["green"], width=1.6)))
@@ -1174,8 +1347,8 @@ def render(tab, _):
                 mode="lines", name="Shorts", line=dict(color=C["red"], width=1.6)))
 
             signal_col = C["red"] if net_pct > 75 else C["green"] if net_pct < 25 else C["amber"]
-            signal_txt = ("Crowded long — reversal risk high"   if net_pct > 75 else
-                          "Crowded short — squeeze risk high"    if net_pct < 25 else
+            signal_txt = ("Crowded long — reversal risk high"  if net_pct > 75 else
+                          "Crowded short — squeeze risk high"   if net_pct < 25 else
                           "Positioning neutral — no crowding signal")
 
         for fig, title in [
@@ -1213,13 +1386,11 @@ def render(tab, _):
                     "CFTC Commitment of Traders released every Friday after close. "
                     "Managed money = hedge funds and CTAs. "
                     "Extreme net long = crowded trade = high reversal risk on any negative catalyst. "
-                    "Extreme net short = short squeeze potential. "
                     "Use as a crowding risk indicator, not a standalone directional signal.", C["accent"]), md=6),
                 dbc.Col(ibox("Commercials — The Smart Money Signal",
                     "Producers and refiners are predominantly short — hedging real physical exposure. "
-                    "When commercials COVER shorts (reduce hedges), it signals they see value at current prices. "
-                    "This is historically the most reliable bullish COT signal. "
-                    "Swap dealer positioning reflects bank hedging demand — not directional.", C["amber"]), md=6),
+                    "When commercials COVER shorts, it signals they see value at current prices. "
+                    "This is historically the most reliable bullish COT signal.", C["amber"]), md=6),
             ]),
         ])
 
@@ -1236,7 +1407,62 @@ def render(tab, _):
             dbc.Row([dbc.Col(cols[0],md=4), dbc.Col(cols[1],md=4), dbc.Col(cols[2],md=4)]),
         ])
 
+    # ── AI INTELLIGENCE ───────────────────────────────────────────────────────
+    elif tab == "ai":
+        with _cache_lock:
+            ai_market    = _cache.get("ai_market")
+            ai_arb       = _cache.get("ai_arb")
+            ai_trades    = _cache.get("ai_trades")
+            ai_generated = _cache.get("ai_generated")
+
+        gen_str = ai_generated.strftime("Generated %H:%M UTC, %d %b %Y") if ai_generated else "Not yet generated"
+
+        return html.Div([
+            sec("AI Market Intelligence", f"Daily analysis — {gen_str}  |  Auto-runs 07:00 UTC  |  ~$0.04/day"),
+            dbc.Row([
+                dbc.Col([
+                    html.Div("Password-protected regeneration:", style={
+                        "fontSize":"11px","color":C["muted"],"marginBottom":"6px"}),
+                    dbc.Row([
+                        dbc.Col(dcc.Input(
+                            id="ai-password", type="password",
+                            placeholder="Enter password...",
+                            style={"background":C["card"],"border":f"1px solid {C['border']}",
+                                   "borderRadius":"4px","fontSize":"11px","padding":"5px 10px",
+                                   "color":C["text"],"width":"180px"}
+                        ), width="auto"),
+                        dbc.Col(dbc.Button("Regenerate Now", id="ai-regen-btn", size="sm", style={
+                            "background":"transparent","border":f"1px solid {C['border']}",
+                            "color":C["muted"],"fontSize":"11px","borderRadius":"4px",
+                        }), width="auto"),
+                        dbc.Col(html.Div(id="ai-regen-msg"), width="auto"),
+                    ], align="center"),
+                ], md=12, style={"marginBottom":"16px"}),
+            ]),
+            _report_block("Market Read", ai_market, C["accent"]),
+            _report_block("Arbitrage Opportunities", ai_arb, C["teal"]),
+            _report_block("Trade Ideas", ai_trades, C["amber"]),
+        ])
+
     return html.Div("Select a tab.", style={"color": C["muted"]})
+
+
+# ── AI REGENERATE CALLBACK ────────────────────────────────────────────────────
+
+@app.callback(
+    Output("ai-regen-msg", "children"),
+    Input("ai-regen-btn", "n_clicks"),
+    State("ai-password", "value"),
+    prevent_initial_call=True,
+)
+def regen_ai(n_clicks, password):
+    if not n_clicks:
+        return ""
+    if password != AI_PASSWORD:
+        return html.Span("Wrong password.", style={"fontSize":"11px","color":C["red"]})
+    threading.Thread(target=_run_daily_ai, daemon=True).start()
+    return html.Span("Regenerating... check back in ~30 seconds.",
+                     style={"fontSize":"11px","color":C["muted"]})
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
